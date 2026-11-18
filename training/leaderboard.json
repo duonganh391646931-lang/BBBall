@@ -1,0 +1,640 @@
+[
+  {
+    "run": "stage2_bc_192x2",
+    "tag": "after_bc",
+    "arch": "192x2",
+    "steps": 71614464,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.1875,
+      "tie_rate": 0.0,
+      "mean_diff": -10.421875,
+      "ci95": 3.211603967397409
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.25,
+      "tie_rate": 0.0,
+      "mean_diff": -6.53125,
+      "ci95": 3.688919539506333
+    },
+    "combined_score": -9.2546875,
+    "timestamp": "2026-11-19 02:12:32"
+  },
+  {
+    "run": "stage2_bc_256x3",
+    "tag": "after_bc",
+    "arch": "256x3",
+    "steps": 88915968,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.234375,
+      "tie_rate": 0.0,
+      "mean_diff": -9.40625,
+      "ci95": 3.4718883200564563
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.375,
+      "tie_rate": 0.0,
+      "mean_diff": -4.4375,
+      "ci95": 3.186443531436303
+    },
+    "combined_score": -7.9156249999999995,
+    "timestamp": "2026-11-19 02:17:21"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "init",
+    "arch": "256x3",
+    "steps": 88915968,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.234375,
+      "tie_rate": 0.0,
+      "mean_diff": -9.40625,
+      "ci95": 3.4718883200564563
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.375,
+      "tie_rate": 0.0,
+      "mean_diff": -4.4375,
+      "ci95": 3.186443531436303
+    },
+    "combined_score": -7.9156249999999995,
+    "timestamp": "2026-11-19 02:29:28"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_20",
+    "arch": "256x3",
+    "steps": 90554368,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.5,
+      "tie_rate": 0.0,
+      "mean_diff": -0.84375,
+      "ci95": 2.8688867674974943
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.46875,
+      "tie_rate": 0.0,
+      "mean_diff": 1.375,
+      "ci95": 3.734581528571626
+    },
+    "combined_score": -0.17812499999999998,
+    "timestamp": "2026-11-19 02:33:04"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_40",
+    "arch": "256x3",
+    "steps": 92192768,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.53125,
+      "tie_rate": 0.0,
+      "mean_diff": 1.484375,
+      "ci95": 3.532629112457258
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.5,
+      "tie_rate": 0.0,
+      "mean_diff": 1.375,
+      "ci95": 3.6208592590977005
+    },
+    "combined_score": 1.4515625,
+    "timestamp": "2026-11-19 02:36:30"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_60",
+    "arch": "256x3",
+    "steps": 93831168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.828125,
+      "tie_rate": 0.0,
+      "mean_diff": 11.578125,
+      "ci95": 2.8584348940290343
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.78125,
+      "tie_rate": 0.0,
+      "mean_diff": 8.0,
+      "ci95": 3.353501780758195
+    },
+    "combined_score": 10.5046875,
+    "timestamp": "2026-11-19 02:39:56"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_80",
+    "arch": "256x3",
+    "steps": 95469568,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.921875,
+      "tie_rate": 0.0,
+      "mean_diff": 13.75,
+      "ci95": 2.5873184316327715
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.84375,
+      "tie_rate": 0.0,
+      "mean_diff": 12.90625,
+      "ci95": 4.0313932832750865
+    },
+    "combined_score": 13.496875,
+    "timestamp": "2026-11-19 02:43:23"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_100",
+    "arch": "256x3",
+    "steps": 97107968,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.890625,
+      "tie_rate": 0.0,
+      "mean_diff": 13.59375,
+      "ci95": 3.2384628823375103
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.90625,
+      "tie_rate": 0.0,
+      "mean_diff": 10.3125,
+      "ci95": 3.1943334089320343
+    },
+    "combined_score": 12.609375,
+    "timestamp": "2026-11-19 02:46:59"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_120",
+    "arch": "256x3",
+    "steps": 98746368,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.828125,
+      "tie_rate": 0.0,
+      "mean_diff": 12.78125,
+      "ci95": 3.074173584748699
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.78125,
+      "tie_rate": 0.0,
+      "mean_diff": 10.59375,
+      "ci95": 4.076766729373389
+    },
+    "combined_score": 12.124999999999998,
+    "timestamp": "2026-11-19 02:51:43"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_140",
+    "arch": "256x3",
+    "steps": 100384768,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.875,
+      "tie_rate": 0.0,
+      "mean_diff": 13.0,
+      "ci95": 2.5654997347278927
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.78125,
+      "tie_rate": 0.0,
+      "mean_diff": 10.40625,
+      "ci95": 4.6492640275621975
+    },
+    "combined_score": 12.221874999999999,
+    "timestamp": "2026-11-19 02:56:26"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_160",
+    "arch": "256x3",
+    "steps": 102023168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.890625,
+      "tie_rate": 0.0,
+      "mean_diff": 15.1875,
+      "ci95": 3.0261959298028867
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.90625,
+      "tie_rate": 0.0,
+      "mean_diff": 14.71875,
+      "ci95": 3.2194473250278586
+    },
+    "combined_score": 15.046875,
+    "timestamp": "2026-11-19 03:00:45"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_180",
+    "arch": "256x3",
+    "steps": 103661568,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.921875,
+      "tie_rate": 0.0,
+      "mean_diff": 14.046875,
+      "ci95": 2.6597445395422845
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 14.3125,
+      "ci95": 4.051590463294392
+    },
+    "combined_score": 14.126562499999999,
+    "timestamp": "2026-11-19 03:04:57"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_200",
+    "arch": "256x3",
+    "steps": 105299968,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 17.984375,
+      "ci95": 3.3786410978976114
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 11.5,
+      "ci95": 3.929866615154161
+    },
+    "combined_score": 16.0390625,
+    "timestamp": "2026-11-19 03:09:04"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_220",
+    "arch": "256x3",
+    "steps": 106938368,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 21.65625,
+      "ci95": 2.979024850936964
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 16.0,
+      "ci95": 4.0088913277138545
+    },
+    "combined_score": 19.959374999999998,
+    "timestamp": "2026-11-19 03:13:18"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_240",
+    "arch": "256x3",
+    "steps": 108576768,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 19.625,
+      "ci95": 2.940486070929997
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.875,
+      "tie_rate": 0.0,
+      "mean_diff": 14.875,
+      "ci95": 3.9737196152528376
+    },
+    "combined_score": 18.2,
+    "timestamp": "2026-11-19 03:17:38"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_260",
+    "arch": "256x3",
+    "steps": 110215168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 24.296875,
+      "ci95": 3.385736529761041
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 16.96875,
+      "ci95": 4.188859258208688
+    },
+    "combined_score": 22.0984375,
+    "timestamp": "2026-11-19 03:21:42"
+  },
+  {
+    "run": "stage3a_ppo_256x3",
+    "tag": "upd_280",
+    "arch": "256x3",
+    "steps": 111853568,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.96875,
+      "tie_rate": 0.0,
+      "mean_diff": 23.375,
+      "ci95": 3.7183004630251886
+    },
+    "vs_gate": {
+      "games": 32,
+      "win_rate": 0.875,
+      "tie_rate": 0.0,
+      "mean_diff": 16.4375,
+      "ci95": 4.824284983791765
+    },
+    "combined_score": 21.29375,
+    "timestamp": "2026-11-19 03:26:04"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "init",
+    "arch": "256x3",
+    "steps": 110215168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 24.296875,
+      "ci95": 3.385736529761041
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.375,
+      "tie_rate": 0.0,
+      "mean_diff": -4.75,
+      "ci95": 4.787325094484778
+    },
+    "combined_score": 8.32109375,
+    "timestamp": "2026-11-19 03:34:28"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_25",
+    "arch": "256x3",
+    "steps": 112263168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 22.78125,
+      "ci95": 3.302482047432069
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.3958333333333333,
+      "tie_rate": 0.0,
+      "mean_diff": -3.5,
+      "ci95": 4.831053950175216
+    },
+    "combined_score": 8.3265625,
+    "timestamp": "2026-11-19 03:41:05"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_50",
+    "arch": "256x3",
+    "steps": 114311168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.984375,
+      "tie_rate": 0.0,
+      "mean_diff": 24.828125,
+      "ci95": 3.4470561174335574
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.4583333333333333,
+      "tie_rate": 0.0,
+      "mean_diff": -1.8958333333333333,
+      "ci95": 3.2299217739870496
+    },
+    "combined_score": 10.129947916666667,
+    "timestamp": "2026-11-19 03:47:52"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_75",
+    "arch": "256x3",
+    "steps": 116359168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 21.90625,
+      "ci95": 3.324121046106274
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.3958333333333333,
+      "tie_rate": 0.0,
+      "mean_diff": -3.625,
+      "ci95": 3.8616276700908583
+    },
+    "combined_score": 7.864062499999999,
+    "timestamp": "2026-11-19 03:54:39"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_100",
+    "arch": "256x3",
+    "steps": 118407168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.9375,
+      "tie_rate": 0.0,
+      "mean_diff": 21.796875,
+      "ci95": 3.3075877688971964
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.4583333333333333,
+      "tie_rate": 0.0,
+      "mean_diff": -0.10416666666666667,
+      "ci95": 3.614551214421852
+    },
+    "combined_score": 9.751302083333334,
+    "timestamp": "2026-11-19 04:01:40"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_125",
+    "arch": "256x3",
+    "steps": 120455168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 25.328125,
+      "ci95": 3.490045174661863
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.5208333333333334,
+      "tie_rate": 0.0,
+      "mean_diff": 0.2708333333333333,
+      "ci95": 3.7411805963797224
+    },
+    "combined_score": 11.546614583333334,
+    "timestamp": "2026-11-19 04:09:05"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_150",
+    "arch": "256x3",
+    "steps": 122503168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.953125,
+      "tie_rate": 0.0,
+      "mean_diff": 25.140625,
+      "ci95": 3.5932981177251664
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.4791666666666667,
+      "tie_rate": 0.0,
+      "mean_diff": -2.375,
+      "ci95": 3.449862701554146
+    },
+    "combined_score": 10.00703125,
+    "timestamp": "2026-11-19 04:16:14"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_175",
+    "arch": "256x3",
+    "steps": 124551168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.984375,
+      "tie_rate": 0.0,
+      "mean_diff": 24.609375,
+      "ci95": 3.5011011722603476
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.4791666666666667,
+      "tie_rate": 0.0,
+      "mean_diff": -0.8541666666666666,
+      "ci95": 3.9191265834001774
+    },
+    "combined_score": 10.604427083333333,
+    "timestamp": "2026-11-19 04:23:16"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_200",
+    "arch": "256x3",
+    "steps": 126599168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.921875,
+      "tie_rate": 0.0,
+      "mean_diff": 23.9375,
+      "ci95": 3.8105242603726968
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.5,
+      "tie_rate": 0.0,
+      "mean_diff": 0.0625,
+      "ci95": 3.8624130564705697
+    },
+    "combined_score": 10.80625,
+    "timestamp": "2026-11-19 04:32:33"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_225",
+    "arch": "256x3",
+    "steps": 128647168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 1.0,
+      "tie_rate": 0.0,
+      "mean_diff": 24.875,
+      "ci95": 3.19664537705806
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.4375,
+      "tie_rate": 0.0,
+      "mean_diff": -1.2916666666666667,
+      "ci95": 3.375684003885707
+    },
+    "combined_score": 10.483333333333333,
+    "timestamp": "2026-11-19 04:39:59"
+  },
+  {
+    "run": "stage4a_league_256x3",
+    "tag": "upd_250",
+    "arch": "256x3",
+    "steps": 130695168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.96875,
+      "tie_rate": 0.0,
+      "mean_diff": 30.3125,
+      "ci95": 3.8823583361147898
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.5208333333333334,
+      "tie_rate": 0.0,
+      "mean_diff": 0.7708333333333334,
+      "ci95": 3.4595308253177737
+    },
+    "combined_score": 14.064583333333333,
+    "timestamp": "2026-11-19 04:46:59"
+  },
+  {
+    "run": "stage4b_gm_256x3",
+    "tag": "init",
+    "arch": "256x3",
+    "steps": 130695168,
+    "vs_heuristic": {
+      "games": 64,
+      "win_rate": 0.96875,
+      "tie_rate": 0.0,
+      "mean_diff": 30.3125,
+      "ci95": 3.8823583361147898
+    },
+    "vs_gate": {
+      "games": 48,
+      "win_rate": 0.2916666666666667,
+      "tie_rate": 0.0,
+      "mean_diff": -5.916666666666667,
+      "ci95": 4.511667590198157
+    },
+    "combined_score": 10.386458333333334,
+    "timestamp": "2026-11-19 06:42:18"
+  }
+]

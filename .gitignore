@@ -11,9 +11,14 @@ coverage/
 __pycache__/
 *.py[cod]
 training/.venv/
+training/.dist/
 training/data/
 training/checkpoints/
+training/checkpoints_*/
+training/baselines/
 training/runs/
+training/*.txt
+training/*.csv
 *.pt
 *.pth
 *.f32

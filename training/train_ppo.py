@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--json-out", type=Path, default=Path("public/models/policy_latest.json"))
     p.add_argument("--log-dir", type=Path, default=Path("training/runs"))
     p.add_argument("--run-name", type=str, default="rtx5060_mappo")
-    p.add_argument("--max-gpu-util", type=float, default=0.70, help="Верхний лимит ресурсов GPU (по умолчанию 0.70 = 70%)")
+    p.add_argument("--max-gpu-util", type=float, default=0.70, help="Верхний лимит ресурсов GPU (по умолчанию 0.70 = 70%%)")
 
     # Параллелизм симуляции и размерности сети
     p.add_argument("--num-workers", type=int, default=6)

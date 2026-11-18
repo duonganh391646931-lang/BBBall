@@ -35,10 +35,10 @@ from vec_env import SubprocBBBallVecEnv
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Обучение ИИ БалбесБола (лимит GPU <= 70%)")
-    p.add_argument("--max-gpu-util", type=float, default=0.70, help="Макс. доля ресурсов GPU/VRAM (0.70 = 70%)")
+    p.add_argument("--max-gpu-util", type=float, default=0.70, help="Макс. доля ресурсов GPU/VRAM (0.70 = 70%%)")
     p.add_argument("--hidden-dim", type=int, default=192)
     p.add_argument("--num-blocks", type=int, default=2)
-    p.add_argument("--num-arenas", type=int, default=0, help="0 = авто (1536 на RTX 5060 <=70%, 64 на CPU)")
+    p.add_argument("--num-arenas", type=int, default=0, help="0 = авто (1536 на RTX 5060 <=70%%, 64 на CPU)")
     p.add_argument("--bc-iters", type=int, default=180, help="Шагов имитационного разогрева (Вариант А)")
     p.add_argument("--ppo-updates", type=int, default=60, help="Суммарно обновлений PPO по 3 ступеням Curriculum")
     p.add_argument("--rollout-steps", type=int, default=64)

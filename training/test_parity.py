@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -19,22 +22,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
-    ckpt_path = PROJECT_ROOT / "training" / "checkpoints" / "balbesbol_trained_latest.pt"
-    if not ckpt_path.exists() or not DEFAULT_JSON_OUT.exists():
-        print("[ОШИБКА] Сначала запустите обучение для генерации чекпоинта и JSON.")
+    p = argparse.ArgumentParser(description="Тест паритета PyTorch <-> TypeScript (< 1e-5)")
+    p.add_argument("--ckpt", type=Path, default=PROJECT_ROOT / "training" / "checkpoints" / "balbesbol_trained_latest.pt")
+    p.add_argument("--json", type=Path, default=DEFAULT_JSON_OUT)
+    args = p.parse_args()
+
+    if not args.json.exists():
+        print(f"[ОШИБКА] Не найден JSON весов: {args.json}")
         return 1
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    exported = json.loads(args.json.read_text(encoding="utf-8"))
     model = BasketballActorCritic(
-        obs_dim=OBS_DIM,
-        hidden_dim=int(ckpt["hidden_dim"]),
-        num_blocks=int(ckpt["num_blocks"]),
+        obs_dim=int(exported["obsDim"]),
+        hidden_dim=int(exported["hiddenDim"]),
+        num_blocks=len(exported["blocks"]),
     )
-    model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-
-    # Важно: сверяем с квантованными до 5 знаков весами из экспортированного JSON (как в браузере)
-    exported = json.loads(DEFAULT_JSON_OUT.read_text(encoding="utf-8"))
 
     def load_lin(mod: torch.nn.Linear, d: dict) -> None:
         mod.weight.data.copy_(torch.tensor(d["weight"], dtype=torch.float32).reshape(d["outFeatures"], d["inFeatures"]))
@@ -62,28 +65,37 @@ def main() -> int:
     py_logits_np = py_logits.numpy()
     py_move_np = py_move.numpy()
 
-    node_code = f"""
-import fs from 'node:fs';
-import {{ NeuralPolicy }} from './src/game/rl/neuralPolicy';
-const weights = JSON.parse(fs.readFileSync({json.dumps(str(DEFAULT_JSON_OUT))}, 'utf8'));
-const policy = new NeuralPolicy(weights);
-const batch = {json.dumps(test_obs.tolist())};
-const out = batch.map((row) => {{
-  const res = policy.forwardRaw(new Float32Array(row));
-  return {{ logits: Array.from(res.logits), move: Array.from(res.moveMean) }};
-}});
-process.stdout.write(JSON.stringify(out));
-"""
-    import os
-
-    tsx_bin = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if os.name == "nt" else "tsx")
-    proc = subprocess.run(
-        [str(tsx_bin), "-e", node_code],
-        cwd=str(PROJECT_ROOT),
-        check=True,
-        capture_output=True,
-        text=True,
+    # На Windows cmd.exe обрезает длинные аргументы -e (WinError 206), поэтому пишем временный .ts скрипт
+    tmp_dir = Path(tempfile.gettempdir())
+    obs_file = tmp_dir / "bbball_parity_obs.json"
+    script_file = PROJECT_ROOT / "scripts" / "_tmp_parity_check.ts"
+    obs_file.write_text(json.dumps(test_obs.tolist()), encoding="utf-8")
+    script_file.write_text(
+        f"import fs from 'node:fs';\n"
+        f"import {{ NeuralPolicy }} from '../src/game/rl/neuralPolicy';\n"
+        f"const weights = JSON.parse(fs.readFileSync({json.dumps(str(args.json.resolve()))}, 'utf8'));\n"
+        f"const policy = new NeuralPolicy(weights);\n"
+        f"const batch: number[][] = JSON.parse(fs.readFileSync({json.dumps(str(obs_file.resolve()))}, 'utf8'));\n"
+        f"const out = batch.map((row) => {{\n"
+        f"  const res = policy.forwardRaw(new Float32Array(row));\n"
+        f"  return {{ logits: Array.from(res.logits), move: Array.from(res.moveMean) }};\n"
+        f"}});\n"
+        f"process.stdout.write(JSON.stringify(out));\n",
+        encoding="utf-8",
     )
+    try:
+        tsx_bin = PROJECT_ROOT / "node_modules" / ".bin" / ("tsx.cmd" if os.name == "nt" else "tsx")
+        proc = subprocess.run(
+            [str(tsx_bin), str(script_file)],
+            cwd=str(PROJECT_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        script_file.unlink(missing_ok=True)
+        obs_file.unlink(missing_ok=True)
+
     ts_results = json.loads(proc.stdout)
 
     max_logit_diff = 0.0
@@ -93,8 +105,8 @@ process.stdout.write(JSON.stringify(out));
         max_move_diff = max(max_move_diff, float(np.max(np.abs(py_move_np[i] - np.array(row["move"], dtype=np.float32)))))
 
     print(
-        f"[ПАРИТЕТ PyTorch <-> TypeScript] max|Δlogits| = {max_logit_diff:.2e}, "
-        f"max|ΔmoveMean| = {max_move_diff:.2e}"
+        f"[ПАРИТЕТ PyTorch <-> TypeScript | {exported['hiddenDim']}x{len(exported['blocks'])}] "
+        f"max|Δlogits| = {max_logit_diff:.2e}, max|ΔmoveMean| = {max_move_diff:.2e}"
     )
     assert max_logit_diff < 1e-5, f"Расхождение логитов {max_logit_diff} >= 1e-5!"
     assert max_move_diff < 1e-5, f"Расхождение вектора движения {max_move_diff} >= 1e-5!"

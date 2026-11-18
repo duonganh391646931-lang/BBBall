@@ -19,6 +19,8 @@ const outDir = path.resolve(process.cwd(), parseArg('out', 'training/data/bc_dat
 const frameSkip = Math.max(1, Number(parseArg('frameSkip', '4')));
 const quarterDuration = Math.max(15, Number(parseArg('quarterDuration', '45')));
 const seed = Number(parseArg('seed', '202601'));
+const iqNoise = parseArg('iqNoise', '0') === '1';
+const modProb = Math.max(0, Math.min(1, Number(parseArg('modProb', '0'))));
 
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -41,6 +43,8 @@ const env = new HeadlessBasketballEnv({
   quarterDuration,
   randomizeRosters: true,
   randomizeTactics: true,
+  modifierProb: modProb,
+  iqPerceptionNoise: iqNoise,
   seed,
 });
 

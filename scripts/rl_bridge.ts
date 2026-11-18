@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import readline from 'node:readline';
 import {
   AgentAction,
@@ -5,6 +6,7 @@ import {
   ControlledTeamsMode,
   HeadlessBasketballEnv,
   NUM_DISCRETE_ACTIONS,
+  NeuralPolicy,
   OBS_DIM,
 } from '../src/game/rl';
 import { MatchModifierId } from '../src/game/types';
@@ -18,6 +20,8 @@ interface InitCmd {
   maxEpisodeSteps?: number;
   randomizeRosters?: boolean;
   randomizeTactics?: boolean;
+  modifierProb?: number;
+  iqPerceptionNoise?: boolean;
   modifiers?: MatchModifierId[];
   seed?: number;
 }
@@ -38,13 +42,38 @@ interface CurriculumCmd {
   modifiers?: MatchModifierId[];
   quarterDuration?: number;
   randomizeTactics?: boolean;
+  modifierProb?: number;
+  iqPerceptionNoise?: boolean;
+}
+
+interface SetOpponentsCmd {
+  cmd: 'set_opponents';
+  /** Для каждой среды: null = встроенный эвристический ИИ, строка = путь к JSON весов NeuralPolicy */
+  envPaths: (string | null)[];
 }
 
 interface CloseCmd {
   cmd: 'close';
 }
 
-type BridgeCommand = InitCmd | ResetCmd | StepCmd | CurriculumCmd | CloseCmd;
+type BridgeCommand = InitCmd | ResetCmd | StepCmd | CurriculumCmd | SetOpponentsCmd | CloseCmd;
+
+const policyCache = new Map<string, { mtimeMs: number; policy: NeuralPolicy }>();
+
+function loadCachedPolicy(filePath: string): NeuralPolicy {
+  const stat = fs.statSync(filePath);
+  const hit = policyCache.get(filePath);
+  if (hit && hit.mtimeMs === stat.mtimeMs) {
+    return hit.policy;
+  }
+  const compiled = new NeuralPolicy(JSON.parse(fs.readFileSync(filePath, 'utf8')));
+  if (policyCache.size >= 14 && !policyCache.has(filePath)) {
+    const oldestKey = policyCache.keys().next().value;
+    if (oldestKey !== undefined) policyCache.delete(oldestKey);
+  }
+  policyCache.set(filePath, { mtimeMs: stat.mtimeMs, policy: compiled });
+  return compiled;
+}
 
 function toBase64(view: ArrayBufferView): string {
   return Buffer.from(view.buffer, view.byteOffset, view.byteLength).toString('base64');
@@ -76,6 +105,8 @@ function handleCommand(msg: BridgeCommand): void {
         maxEpisodeSteps: msg.maxEpisodeSteps ?? 4500,
         randomizeRosters: msg.randomizeRosters ?? true,
         randomizeTactics: msg.randomizeTactics ?? true,
+        modifierProb: msg.modifierProb ?? 0,
+        iqPerceptionNoise: msg.iqPerceptionNoise ?? false,
         modifiers: msg.modifiers ?? [],
         seed: baseSeed + idx * 9973,
       });
@@ -188,7 +219,18 @@ function handleCommand(msg: BridgeCommand): void {
         modifiers: msg.modifiers,
         quarterDuration: msg.quarterDuration,
         randomizeTactics: msg.randomizeTactics,
+        modifierProb: msg.modifierProb,
+        iqPerceptionNoise: msg.iqPerceptionNoise,
       });
+    }
+    writeJsonLine({ ok: true });
+    return;
+  }
+
+  if (msg.cmd === 'set_opponents') {
+    for (let e = 0; e < envs.length; e++) {
+      const p = msg.envPaths[e] ?? null;
+      envs[e].setOpponentPolicy(p ? loadCachedPolicy(p) : null);
     }
     writeJsonLine({ ok: true });
     return;

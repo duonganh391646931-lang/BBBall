@@ -149,6 +149,13 @@ class GPUResourceLimiter:
             return sleep_s
         return 0.0
 
+    def status_summary(self) -> str:
+        alloc_mb, cap_mb = self.vram_status_mb()
+        return (
+            f"limit={self.max_fraction * 100:.0f}% util(EMA)={self.ema_gpu_util:.1f}% "
+            f"VRAM={alloc_mb:.0f}/{cap_mb:.0f} MiB sleep={self.total_sleep_ms / 1000.0:.1f}s"
+        )
+
     def vram_status_mb(self) -> tuple[float, float]:
         if not self.is_cuda:
             return 0.0, 0.0

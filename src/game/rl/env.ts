@@ -7,7 +7,8 @@ import {
   extractTeacherMoveVector,
   wrapTeacherCallbacks,
 } from './actions';
-import { encodeObservation } from './encoder';
+import { applyInertialIqPerceptionNoise, encodeObservation } from './encoder';
+import { NeuralPolicy, computeIqTemperature } from './neuralPolicy';
 import { MatchRewardTracker, RewardConfig } from './rewards';
 import {
   AgentAction,
@@ -37,6 +38,10 @@ export interface HeadlessEnvConfig {
   randomizeRosters?: boolean;
   /** Случайная рандомизация тактик при reset */
   randomizeTactics?: boolean;
+  /** Вероятность включения случайных модификаторов матча при reset (0..1, по умолчанию 0) */
+  modifierProb?: number;
+  /** Применять инерционный шум восприятия низкого IQ, идентичный контроллеру 'neural' в sim.ts */
+  iqPerceptionNoise?: boolean;
   /** Настройки функции награды */
   rewardConfig?: Partial<RewardConfig>;
   /** Начальное зерно ГПСЧ */
@@ -76,6 +81,13 @@ export interface TeacherStepRecord extends EnvStepResult {
 }
 
 const ALL_TACTICS: readonly TeamTactic[] = ['balanced', 'blitz', 'perimeter', 'dirty'];
+const ALL_MODIFIERS: readonly MatchModifierId[] = [
+  'two_balls',
+  'ice_court',
+  'low_gravity',
+  'paint_trampolines',
+  'explosive_ball',
+];
 
 /**
  * Быстрый детерминированный ГПСЧ Mulberry32 для воспроизводимых эпизодов RL.
@@ -106,6 +118,12 @@ export class HeadlessBasketballEnv {
   private baseTactics?: [TeamTactic, TeamTactic];
   private readonly randomizeRosters: boolean;
   private randomizeTactics: boolean;
+  private modifierProb: number;
+  private iqPerceptionNoise: boolean;
+  private opponentPolicy: NeuralPolicy | null = null;
+  private readonly oppObsScratch = new Float32Array(OBS_DIM);
+  private readonly oppMaskScratch = new Uint8Array(NUM_DISCRETE_ACTIONS);
+  private readonly oppActScratch: AgentAction = { discrete: 0, moveX: 0, moveY: 0 };
   private rng: () => number;
   private episodeSeedCounter: number;
 
@@ -134,6 +152,8 @@ export class HeadlessBasketballEnv {
     this.baseTactics = config.tactics;
     this.randomizeRosters = config.randomizeRosters ?? true;
     this.randomizeTactics = config.randomizeTactics ?? false;
+    this.modifierProb = Math.max(0, Math.min(1, config.modifierProb ?? 0));
+    this.iqPerceptionNoise = config.iqPerceptionNoise ?? false;
     this.episodeSeedCounter = (config.seed ?? 42) >>> 0;
     this.rng = createSeededRng(this.episodeSeedCounter);
 
@@ -150,10 +170,16 @@ export class HeadlessBasketballEnv {
     this.reset(this.episodeSeedCounter);
   }
 
+  public setOpponentPolicy(policy: NeuralPolicy | null): void {
+    this.opponentPolicy = policy;
+  }
+
   public setCurriculum(options: {
     modifiers?: MatchModifierId[];
     quarterDuration?: number;
     randomizeTactics?: boolean;
+    modifierProb?: number;
+    iqPerceptionNoise?: boolean;
   }): void {
     if (options.modifiers !== undefined) {
       this.modifiers = [...options.modifiers];
@@ -163,6 +189,12 @@ export class HeadlessBasketballEnv {
     }
     if (options.randomizeTactics !== undefined) {
       this.randomizeTactics = options.randomizeTactics;
+    }
+    if (options.modifierProb !== undefined) {
+      this.modifierProb = Math.max(0, Math.min(1, options.modifierProb));
+    }
+    if (options.iqPerceptionNoise !== undefined) {
+      this.iqPerceptionNoise = options.iqPerceptionNoise;
     }
   }
 
@@ -187,6 +219,9 @@ export class HeadlessBasketballEnv {
     for (let i = 0; i < this.agentPlayers.length; i++) {
       const p = this.agentPlayers[i];
       encodeObservation(this.state, p, this.obsBuf, i * OBS_DIM);
+      if (this.iqPerceptionNoise) {
+        applyInertialIqPerceptionNoise(this.obsBuf, p, this.state, this.rng, i * OBS_DIM);
+      }
       computeActionMask(this.state, p, this.maskBuf, i * NUM_DISCRETE_ACTIONS);
     }
   }
@@ -227,6 +262,17 @@ export class HeadlessBasketballEnv {
         ]
       : ['balanced', 'balanced'];
 
+    let matchModifiers: MatchModifierId[] = this.modifiers;
+    if (this.modifierProb > 0 && this.modifiers.length === 0 && this.rng() < this.modifierProb) {
+      const m1 = ALL_MODIFIERS[Math.floor(this.rng() * ALL_MODIFIERS.length)];
+      if (this.rng() < 0.3) {
+        const m2 = ALL_MODIFIERS[Math.floor(this.rng() * ALL_MODIFIERS.length)];
+        matchModifiers = m2 !== m1 ? [m1, m2] : [m1];
+      } else {
+        matchModifiers = [m1];
+      }
+    }
+
     const teamControllers: CreateMatchOptions['teamControllers'] =
       this.controlledTeams === 'both'
         ? ['external', 'external']
@@ -237,7 +283,7 @@ export class HeadlessBasketballEnv {
     const opts: CreateMatchOptions = {
       mode: 'exhibition',
       quarterDuration: this.quarterDuration,
-      modifiers: this.modifiers,
+      modifiers: matchModifiers,
       tactics,
       teamControllers,
       headless: true,
@@ -267,6 +313,7 @@ export class HeadlessBasketballEnv {
   public step(actions: readonly AgentAction[]): EnvStepResult {
     this.stepCount++;
     this.refreshAgentOrdering();
+    const decisionDt = this.frameSkip * this.physicsDt;
 
     for (let sub = 0; sub < this.frameSkip; sub++) {
       if (this.state.finished) break;
@@ -284,11 +331,38 @@ export class HeadlessBasketballEnv {
                 act,
                 this.maskBuf,
                 callbacks,
-                agentIdx * NUM_DISCRETE_ACTIONS
+                agentIdx * NUM_DISCRETE_ACTIONS,
+                decisionDt,
+                stepRng
               );
             }
           }
           // На промежуточных тиках (sub > 0) агент продолжает движение к выбранному (targetX, targetY)
+        } else if (this.opponentPolicy) {
+          if (isFirstSubStep) {
+            encodeObservation(st, player, this.oppObsScratch, 0);
+            applyInertialIqPerceptionNoise(this.oppObsScratch, player, st, stepRng, 0);
+            computeActionMask(st, player, this.oppMaskScratch, 0);
+            const iqTemp = computeIqTemperature(player.effectiveStats.iq);
+            this.opponentPolicy.act(
+              this.oppObsScratch,
+              this.oppMaskScratch,
+              false,
+              stepRng,
+              this.oppActScratch,
+              iqTemp
+            );
+            applyAgentAction(
+              st,
+              player,
+              this.oppActScratch,
+              this.oppMaskScratch,
+              callbacks,
+              0,
+              decisionDt,
+              stepRng
+            );
+          }
         } else {
           stepPlayerAI(st, player, dt, stepRng, callbacks);
         }

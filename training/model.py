@@ -1,6 +1,10 @@
 """
 Условная нейросеть BasketballActorCritic (OBS_DIM=244, NUM_DISCRETE_ACTIONS=23, CONT_ACTION_DIM=2)
-и экспортёр обученных весов одновременно в JSON и во встроенный модуль веб-движка defaultTrainedWeights.ts.
+с поддержкой:
+  * произвольной глубины/ширины актора (192x2, 256x3 и др. — 100% совместимо с браузером);
+  * расширенного централизованного критика [obs, team_mean, team_max] (только при обучении, 0 байт в браузере);
+  * точной игровой IQ-температуры computeIqTemperature(iq) прямо внутри распределения политики;
+  * экспорта обученных весов актора в JSON и во встроенный модуль defaultTrainedWeights.ts.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from torch.distributions import Categorical, Normal
 OBS_DIM = 244
 NUM_DISCRETE_ACTIONS = 23
 CONT_ACTION_DIM = 2
+IQ_OBS_INDEX = 54  # st.iq / 115.0 в src/game/rl/encoder.ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_JSON_OUT = PROJECT_ROOT / "public" / "models" / "policy_latest.json"
@@ -29,6 +34,13 @@ def _init_linear(layer: nn.Linear, gain: float = math.sqrt(2.0)) -> nn.Linear:
     if layer.bias is not None:
         nn.init.zeros_(layer.bias)
     return layer
+
+
+def compute_iq_temperature(obs: torch.Tensor) -> torch.Tensor:
+    """Точный тензорный эквивалент computeIqTemperature(iq) из src/game/rl/neuralPolicy.ts."""
+    iq = obs[..., IQ_OBS_INDEX].float() * 115.0
+    norm = torch.clamp(iq / 100.0, 0.0, 1.15)
+    return torch.clamp(1.75 - 1.52 * norm, 0.22, 1.65)
 
 
 class ResidualMLPBlock(nn.Module):
@@ -53,9 +65,10 @@ class ResidualMLPBlock(nn.Module):
 class BasketballActorCritic(nn.Module):
     """
     Условная сеть Актор-Критик (CTDE MAPPO):
-      - Актор: 244 входа (зеркальные координаты, 9 статов, взгляд судьи, 2 мяча, 31 черта, 5 модификаторов)
-        -> 192x2 ResMLP -> 23 дискретных действия + 2 непрерывные координаты смещения цели.
-      - Централизованный Критик: [obs, team_mean_obs] (488 входов) -> V(s).
+      - Актор: 244 входа -> ResMLP (например 192x2 или 256x3) -> 23 дискретных + 2 непрерывных действия.
+      - Централизованный Критик:
+          critic_context_mult=2 -> [obs, team_mean] (488 входов, обратная совместимость)
+          critic_context_mult=3 -> [obs, team_mean, team_max] (732 входа, повышенная точность V(s))
     """
 
     def __init__(
@@ -66,6 +79,9 @@ class BasketballActorCritic(nn.Module):
         discrete_actions: int = NUM_DISCRETE_ACTIONS,
         cont_dim: int = CONT_ACTION_DIM,
         init_log_std: float = -0.70,
+        critic_hidden_dim: int | None = None,
+        critic_num_blocks: int | None = None,
+        critic_context_mult: int = 2,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -73,6 +89,9 @@ class BasketballActorCritic(nn.Module):
         self.num_blocks = num_blocks
         self.discrete_actions = discrete_actions
         self.cont_dim = cont_dim
+        self.critic_hidden_dim = int(critic_hidden_dim or hidden_dim)
+        self.critic_num_blocks = int(critic_num_blocks or num_blocks)
+        self.critic_context_mult = int(critic_context_mult)
 
         self.input_linear = _init_linear(nn.Linear(obs_dim, hidden_dim), gain=math.sqrt(2.0))
         self.input_norm = nn.LayerNorm(hidden_dim, eps=1e-5)
@@ -82,11 +101,13 @@ class BasketballActorCritic(nn.Module):
         self.move_mean_head = _init_linear(nn.Linear(hidden_dim, cont_dim), gain=0.1)
         self.move_log_std = nn.Parameter(torch.full((cont_dim,), init_log_std, dtype=torch.float32))
 
-        critic_in = obs_dim * 2
-        self.critic_input = _init_linear(nn.Linear(critic_in, hidden_dim), gain=math.sqrt(2.0))
-        self.critic_norm = nn.LayerNorm(hidden_dim, eps=1e-5)
-        self.critic_blocks = nn.ModuleList([ResidualMLPBlock(hidden_dim) for _ in range(num_blocks)])
-        self.value_head = _init_linear(nn.Linear(hidden_dim, 1), gain=1.0)
+        critic_in = obs_dim * self.critic_context_mult
+        self.critic_input = _init_linear(nn.Linear(critic_in, self.critic_hidden_dim), gain=math.sqrt(2.0))
+        self.critic_norm = nn.LayerNorm(self.critic_hidden_dim, eps=1e-5)
+        self.critic_blocks = nn.ModuleList(
+            [ResidualMLPBlock(self.critic_hidden_dim) for _ in range(self.critic_num_blocks)]
+        )
+        self.value_head = _init_linear(nn.Linear(self.critic_hidden_dim, 1), gain=1.0)
 
     def encode_actor(self, obs: torch.Tensor) -> torch.Tensor:
         x = F.silu(self.input_norm(self.input_linear(obs)))
@@ -101,8 +122,13 @@ class BasketballActorCritic(nn.Module):
         return logits, move_mean
 
     def forward_critic(self, obs: torch.Tensor, team_context: torch.Tensor | None = None) -> torch.Tensor:
-        if team_context is None:
-            team_context = obs
+        expected_ctx = self.obs_dim * (self.critic_context_mult - 1)
+        if team_context is None or team_context.shape[-1] != expected_ctx:
+            team_context = compute_team_context(
+                obs, team_size=5, include_max=(self.critic_context_mult == 3)
+            )
+            if team_context.shape[-1] != expected_ctx:
+                team_context = obs.repeat_interleave(self.critic_context_mult - 1, dim=-1)
         c_in = torch.cat([obs, team_context], dim=-1)
         v = F.silu(self.critic_norm(self.critic_input(c_in)))
         for blk in self.critic_blocks:
@@ -116,14 +142,24 @@ class BasketballActorCritic(nn.Module):
         value = self.forward_critic(obs, team_context)
         return logits, move_mean, value
 
-    def _masked_logits_fp32(self, logits: torch.Tensor, action_masks: torch.Tensor) -> torch.Tensor:
+    def _masked_logits_fp32(
+        self,
+        logits: torch.Tensor,
+        action_masks: torch.Tensor,
+        obs: torch.Tensor | None = None,
+        use_iq_temp: bool = False,
+    ) -> torch.Tensor:
         mask_bool = action_masks.to(dtype=torch.bool)
         empty_rows = ~mask_bool.any(dim=-1, keepdim=True)
         if empty_rows.any():
             fallback = torch.zeros_like(mask_bool)
             fallback[..., 0] = True
             mask_bool = torch.where(empty_rows, fallback, mask_bool)
-        return logits.float().masked_fill(~mask_bool, -1e9)
+        scaled = logits.float()
+        if use_iq_temp and obs is not None:
+            tau = compute_iq_temperature(obs).unsqueeze(-1)
+            scaled = scaled / tau
+        return scaled.masked_fill(~mask_bool, -1e9)
 
     @torch.no_grad()
     def act(
@@ -132,13 +168,14 @@ class BasketballActorCritic(nn.Module):
         action_masks: torch.Tensor,
         team_context: torch.Tensor | None = None,
         deterministic: bool = False,
+        use_iq_temp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, move_mean, value = self.forward_actor_critic(obs, team_context)
-        masked_logits = self._masked_logits_fp32(logits, action_masks)
+        masked_logits = self._masked_logits_fp32(logits, action_masks, obs=obs, use_iq_temp=use_iq_temp)
         cat_dist = Categorical(logits=masked_logits)
 
         mean_fp32 = move_mean.float()
-        std_fp32 = torch.exp(torch.clamp(self.move_log_std.float(), -2.5, 0.5)).expand_as(mean_fp32)
+        std_fp32 = torch.exp(torch.clamp(self.move_log_std.float(), -3.0, 0.5)).expand_as(mean_fp32)
         cont_dist = Normal(mean_fp32, std_fp32)
 
         if deterministic:
@@ -159,13 +196,14 @@ class BasketballActorCritic(nn.Module):
         disc_actions: torch.Tensor,
         raw_move_actions: torch.Tensor,
         team_context: torch.Tensor | None = None,
+        use_iq_temp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, move_mean, value = self.forward_actor_critic(obs, team_context)
-        masked_logits = self._masked_logits_fp32(logits, action_masks)
+        masked_logits = self._masked_logits_fp32(logits, action_masks, obs=obs, use_iq_temp=use_iq_temp)
         cat_dist = Categorical(logits=masked_logits)
 
         mean_fp32 = move_mean.float()
-        std_fp32 = torch.exp(torch.clamp(self.move_log_std.float(), -2.5, 0.5)).expand_as(mean_fp32)
+        std_fp32 = torch.exp(torch.clamp(self.move_log_std.float(), -3.0, 0.5)).expand_as(mean_fp32)
         cont_dist = Normal(mean_fp32, std_fp32)
 
         log_prob = cat_dist.log_prob(disc_actions) + cont_dist.log_prob(raw_move_actions.float()).sum(dim=-1)
@@ -173,14 +211,17 @@ class BasketballActorCritic(nn.Module):
         return log_prob, entropy, value.float(), masked_logits
 
 
-def compute_team_context(obs: torch.Tensor, team_size: int = 5) -> torch.Tensor:
+def compute_team_context(obs: torch.Tensor, team_size: int = 5, include_max: bool = False) -> torch.Tensor:
     if obs.shape[-2] % team_size != 0:
-        return obs
+        return torch.cat([obs, obs], dim=-1) if include_max else obs
     lead_shape = obs.shape[:-2]
     num_teams = obs.shape[-2] // team_size
     grouped = obs.reshape(*lead_shape, num_teams, team_size, obs.shape[-1])
-    team_mean = grouped.mean(dim=-2, keepdim=True).expand_as(grouped)
-    return team_mean.reshape_as(obs)
+    team_mean = grouped.mean(dim=-2, keepdim=True).expand_as(grouped).reshape_as(obs)
+    if not include_max:
+        return team_mean
+    team_max = grouped.amax(dim=-2, keepdim=True).expand_as(grouped).reshape_as(obs)
+    return torch.cat([team_mean, team_max], dim=-1)
 
 
 def _linear_to_dict(layer: nn.Linear, precision: int = 6) -> dict[str, Any]:
