@@ -1,0 +1,12 @@
+# Стек обучения баскетбольного ИИ под NVIDIA GeForce RTX 5060 (Blackwell GB206, sm_120, 8 ГБ GDDR7)
+# Установка (Linux / Windows WSL2 / Windows Native, драйвер NVIDIA >= 572.xx):
+#   python -m venv training/.venv
+#   source training/.venv/bin/activate
+#   pip install --upgrade pip
+#   pip install -r training/requirements-rtx5060.txt
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.7.0
+numpy>=1.26.4
+tensorboard>=2.18.0
+tqdm>=4.66.0

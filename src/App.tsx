@@ -7,6 +7,10 @@ import { TitleOverlay } from './components/TitleOverlay';
 import { TournamentModal } from './components/TournamentModal';
 import { CourtTransform, renderMatchTopDown, screenToWorld } from './game/renderer';
 import {
+  PolicyWeightsJSON,
+  loadActiveNeuralPolicyFromJson,
+} from './game/rl';
+import {
   callTeamTimeout,
   createMatch,
   requestPlayerSubstitution,
@@ -27,9 +31,12 @@ import {
   MatchState,
   PlayerEntity,
   PlayerStats,
+  TeamControllerType,
   TeamTactic,
   TournamentState,
 } from './game/types';
+
+const SILENT_NEURAL_CONTROLLERS: [TeamControllerType, TeamControllerType] = ['neural', 'neural'];
 
 function detectInitialScreenState(): GameScreenState {
   if (typeof window === 'undefined') return 'title';
@@ -51,7 +58,9 @@ export default function App() {
   );
 
   // Живое состояние матча хранится в ref для 60 FPS без пересоздания Canvas, а HUD получает срез ~12 Гц
-  const matchRef = useRef<MatchState>(createMatch({ quarterDuration: 45 }));
+  const matchRef = useRef<MatchState>(
+    createMatch({ quarterDuration: 45, teamControllers: SILENT_NEURAL_CONTROLLERS })
+  );
   const [hudSnapshot, setHudSnapshot] = useState<MatchState>(() => matchRef.current);
 
   const screenStateRef = useRef<GameScreenState>(screenState);
@@ -87,6 +96,23 @@ export default function App() {
     tournamentRef.current = tournament;
   }, [tournament]);
 
+  // Тихий подхват свежих весов (/models/policy_latest.json), если локальный тренажёр обновил слепок
+  useEffect(() => {
+    let active = true;
+    fetch('/models/policy_latest.json')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: PolicyWeightsJSON | null) => {
+        if (!active || !json || json.formatVersion !== 1) return;
+        loadActiveNeuralPolicyFromJson(json);
+      })
+      .catch(() => {
+        // Используется встроенный слепок обученных весов DEFAULT_EMBEDDED_POLICY_WEIGHTS
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const forceHudSync = useCallback(() => {
     canvasDirtyRef.current = true;
     setHudSnapshot({
@@ -104,6 +130,9 @@ export default function App() {
       shotChart: [...matchRef.current.shotChart],
       modifiers: [...matchRef.current.modifiers],
       tactics: [...matchRef.current.tactics] as [TeamTactic, TeamTactic],
+      teamControllers: matchRef.current.teamControllers
+        ? ([...matchRef.current.teamControllers] as [TeamControllerType, TeamControllerType])
+        : SILENT_NEURAL_CONTROLLERS,
       events: [...matchRef.current.events],
     });
   }, []);
@@ -116,6 +145,7 @@ export default function App() {
       quarterDuration: prev.quarterDuration,
       modifiers: prev.modifiers,
       tactics: prev.tactics,
+      teamControllers: SILENT_NEURAL_CONTROLLERS,
     });
     setSandboxOpen(false);
     setTournamentOpen(false);
@@ -127,7 +157,6 @@ export default function App() {
   // Главный 60 FPS игровой цикл (смонтирован один раз, не пересоздаёт canvas!)
   useEffect(() => {
     let rafId = 0;
-    let timerId = 0;
     let cancelled = false;
     let lastTime = performance.now();
     let lastHudKey = '';
@@ -173,7 +202,10 @@ export default function App() {
           if (m.finished) {
             if (curScreen === 'title') {
               // На заставке перезапускаем демо-разминку бесшовно
-              matchRef.current = createMatch({ quarterDuration: 45 });
+              matchRef.current = createMatch({
+                quarterDuration: 45,
+                teamControllers: SILENT_NEURAL_CONTROLLERS,
+              });
             } else {
               // Если шёл турнирный матч — записываем результат в сетку кубка!
               if (m.mode === 'tournament') {
@@ -222,24 +254,19 @@ export default function App() {
         const sel =
           curM.players.find((p) => p.id === curM.selectedPlayerId) ??
           curM.bench.find((p) => p.id === curM.selectedPlayerId);
-        const hudKey = `${curM.quarter}|${Math.ceil(curM.quarterTimeRemaining)}|${Math.ceil(curM.shotClock)}|${curM.score[0]}:${curM.score[1]}|${curM.timeoutsRemaining[0]}:${curM.timeoutsRemaining[1]}|${Math.ceil(curM.playCallCooldown[0])}|${curM.activePlayCall?.play ?? ''}|${curM.substitutionsCount}|${curM.nextEventId}|${curM.lastBannerText ?? ''}|${sel?.id ?? ''}:${sel?.aiAction ?? ''}:${sel?.fouls ?? 0}:${sel?.hotStreak ?? 0}:${Math.round((sel?.energy ?? 0) / 5)}`;
+        const hudKey = `${curM.quarter}|${Math.ceil(curM.quarterTimeRemaining)}|${Math.ceil(curM.shotClock)}|${curM.score[0]}:${curM.score[1]}|${curM.timeoutsRemaining[0]}:${curM.timeoutsRemaining[1]}|${Math.ceil(curM.playCallCooldown[0])}|${curM.activePlayCall?.play ?? ''}|${curM.substitutionsCount}|${curM.nextEventId}|${curM.lastBannerText ?? ''}|${curM.teamControllers?.[0] ?? 'heuristic'}:${curM.teamControllers?.[1] ?? 'heuristic'}|${sel?.id ?? ''}:${sel?.aiAction ?? ''}:${sel?.fouls ?? 0}:${sel?.hotStreak ?? 0}:${Math.round((sel?.energy ?? 0) / 5)}`;
         if (hudKey !== lastHudKey) {
           lastHudKey = hudKey;
           forceHudSync();
         }
       }
 
-      timerId = window.setTimeout(() => {
-        if (!cancelled) {
-          rafId = requestAnimationFrame(frame);
-        }
-      }, 16);
+      rafId = requestAnimationFrame(frame);
     };
 
     rafId = requestAnimationFrame(frame);
     return () => {
       cancelled = true;
-      window.clearTimeout(timerId);
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resizeCanvas);
     };
@@ -290,7 +317,7 @@ export default function App() {
           sound.muted = next;
           return next;
         });
-      } else if (e.code === 'KeyT' && !modalOpenRef.current) {
+      } else if ((e.code === 'KeyT' || e.code === 'KeyV') && !modalOpenRef.current) {
         setShowTacticalOverlay((prev) => !prev);
       } else if (
         e.code === 'KeyO' &&
@@ -394,6 +421,7 @@ export default function App() {
       quarterDuration: matchRef.current.quarterDuration,
       modifiers: matchRef.current.modifiers,
       tactics: [matchRef.current.tactics[0], 'balanced'],
+      teamControllers: SILENT_NEURAL_CONTROLLERS,
     });
     setTournamentOpen(false);
     setSandboxOpen(false);
@@ -512,6 +540,7 @@ export default function App() {
                   quarterDuration: prev.quarterDuration,
                   modifiers: prev.modifiers,
                   tactics: prev.tactics,
+                  teamControllers: SILENT_NEURAL_CONTROLLERS,
                 });
                 setScreenState('playing');
                 forceHudSync();
@@ -519,7 +548,10 @@ export default function App() {
             }}
             onRerollNewMatch={startFreshExhibition}
             onReturnToTitle={() => {
-              matchRef.current = createMatch({ quarterDuration: 45 });
+              matchRef.current = createMatch({
+                quarterDuration: 45,
+                teamControllers: SILENT_NEURAL_CONTROLLERS,
+              });
               setScreenState('title');
               forceHudSync();
             }}

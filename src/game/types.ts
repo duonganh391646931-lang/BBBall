@@ -280,6 +280,8 @@ export interface MatchModifierDef {
 
 export type TeamTactic = 'balanced' | 'blitz' | 'perimeter' | 'dirty';
 
+export type TeamControllerType = 'heuristic' | 'neural' | 'external';
+
 export interface PooledParticle {
   active: boolean;
   x: number;
@@ -423,6 +425,8 @@ export interface MatchState {
   freeThrow: FreeThrowSequenceState | null; // активная серия штрафных бросков
   aiCoachCooldown: number; // кулдаун адаптации тактики ИИ-тренером соперника
   tactics: [TeamTactic, TeamTactic];
+  teamControllers?: [TeamControllerType, TeamControllerType];
+  headless?: boolean;
   modifiers: MatchModifierId[];
 
   celebrationTimer: number;

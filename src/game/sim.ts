@@ -1,4 +1,5 @@
 import {
+  AIDecisionCallbacks,
   chooseAdaptiveAiTactic,
   getCommittedBypassSide,
   stepPlayerAI,
@@ -37,6 +38,10 @@ import {
   isPointOutOfBounds,
   isThreePointShot,
 } from './physics';
+import { applyAgentAction, computeActionMask } from './rl/actions';
+import { applyInertialIqPerceptionNoise, encodeObservation } from './rl/encoder';
+import { computeIqTemperature, getActiveNeuralPolicy } from './rl/neuralPolicy';
+import { AgentAction, NUM_DISCRETE_ACTIONS, OBS_DIM } from './rl/schema';
 import { sound } from './sound';
 import {
   CLUB_PRESETS,
@@ -60,6 +65,7 @@ import {
   PooledParticle,
   ShotStyle,
   TacticalCallout,
+  TeamControllerType,
   TeamTactic,
 } from './types';
 
@@ -116,8 +122,22 @@ export interface CreateMatchOptions {
   quarterDuration?: number;
   modifiers?: MatchModifierId[];
   tactics?: [TeamTactic, TeamTactic];
+  teamControllers?: [TeamControllerType, TeamControllerType];
+  headless?: boolean;
   rng?: () => number;
 }
+
+export type PlayerDecisionDriver = (
+  state: MatchState,
+  player: PlayerEntity,
+  dt: number,
+  rng: () => number,
+  callbacks: AIDecisionCallbacks
+) => void;
+
+const scratchNeuralObs = new Float32Array(OBS_DIM);
+const scratchNeuralMask = new Uint8Array(NUM_DISCRETE_ACTIONS);
+const scratchNeuralAction: AgentAction = { discrete: 0, moveX: 0, moveY: 0 };
 
 function rotateAngleToward(current: number, target: number, maxDelta: number): number {
   const diff = wrapAngle(target - current);
@@ -169,6 +189,7 @@ export function resetPlayerForMatch(
     windupTargetHoop: null,
     windupBallId: null,
     windupShotStyle: 'standard',
+    schizoTimer: p.schizoTimer && p.schizoTimer > 0 ? p.schizoTimer : 7.5,
     schizoBreadMode: false,
     cutTimer: 0,
     screenTargetId: null,
@@ -188,6 +209,7 @@ export function resetPlayerForMatch(
     paintTimer: 0,
     closelyGuardedTimer: 0,
     airborneWithBall: false,
+    caughtInAir: false,
     hasStoppedDribble: false,
     dribbleLiveTimer: 0,
     dodgeSide: slotIndex % 2 === 0 ? 1 : -1,
@@ -264,12 +286,13 @@ export function createMatch(opts: CreateMatchOptions = {}): MatchState {
   const bench = [...team0Bench, ...team1Bench];
   const modifiers = opts.modifiers ? [...opts.modifiers] : [];
   const quarterDuration = opts.quarterDuration ?? 45;
+  const headless = Boolean(opts.headless);
 
   const balls: BallState[] = modifiers.includes('two_balls')
     ? [createTipoffBall(1, -48), createTipoffBall(2, 48)]
     : [createTipoffBall(1, 0)];
 
-  const particles: PooledParticle[] = Array.from({ length: PARTICLE_POOL_SIZE }, () => ({
+  const particles: PooledParticle[] = Array.from({ length: headless ? 1 : PARTICLE_POOL_SIZE }, () => ({
     active: false,
     x: 0,
     y: 0,
@@ -283,7 +306,7 @@ export function createMatch(opts: CreateMatchOptions = {}): MatchState {
     maxAge: 0.5,
   }));
 
-  const callouts: TacticalCallout[] = Array.from({ length: CALLOUT_POOL_SIZE }, () => ({
+  const callouts: TacticalCallout[] = Array.from({ length: headless ? 1 : CALLOUT_POOL_SIZE }, () => ({
     active: false,
     x: 0,
     y: 0,
@@ -338,10 +361,12 @@ export function createMatch(opts: CreateMatchOptions = {}): MatchState {
     freeThrow: null,
     aiCoachCooldown: 3.0,
     tactics: opts.tactics ?? ['balanced', 'balanced'],
+    teamControllers: opts.teamControllers ? [...opts.teamControllers] : ['heuristic', 'heuristic'],
+    headless,
     modifiers,
-    celebrationTimer: 1.4,
+    celebrationTimer: headless ? 0 : 1.4,
     quarterBreakTimer: 0,
-    lastBannerText: 'Q1 · СПОРНЫЙ МЯЧ!',
+    lastBannerText: headless ? null : 'Q1 · СПОРНЫЙ МЯЧ!',
     lastBannerColor: '#fbbf24',
     hitstopTimer: 0,
     cameraShake: 0,
@@ -381,6 +406,10 @@ export function pushEvent(
   team: 0 | 1 | 'ref' | 'neutral',
   highlight = false
 ): void {
+  if (state.headless) {
+    state.nextEventId++;
+    return;
+  }
   const ev = {
     id: state.nextEventId++,
     quarterLabel: getQuarterLabel(state.quarter),
@@ -403,6 +432,7 @@ export function spawnCallout(
   color = '#fbbf24',
   duration = 1.25
 ): void {
+  if (state.headless) return;
   const slot = state.callouts[state.calloutCursor];
   state.calloutCursor = (state.calloutCursor + 1) % state.callouts.length;
   slot.active = true;
@@ -424,6 +454,7 @@ export function spawnParticles(
   speedScale = 1,
   rng: () => number = Math.random
 ): void {
+  if (state.headless) return;
   for (let i = 0; i < count; i++) {
     const p = state.particles[state.particleCursor];
     state.particleCursor = (state.particleCursor + 1) % state.particles.length;
@@ -1542,6 +1573,10 @@ export function startInboundPlay(
     isAfterScore: isBaselineAfterScore,
   };
 
+  if (ball.wasShotAttempt) {
+    recordMissedShotOutcome(state, ball);
+    ball.wasShotAttempt = false;
+  }
   giveBallToPlayer(state, ball, inbounder, rng, false);
   state.shotClock = shotClockValue;
   inbounder.aiAction = 'inbound_pass';
@@ -1759,11 +1794,13 @@ export function startFreeThrowSequence(
     }
     const nextTeam: 0 | 1 = retainPossessionTeam ?? (shootingTeam === 0 ? 1 : 0);
     const rec = state.players.find((p) => p.team === nextTeam && p.penaltyTimer <= 0) ?? shooter;
+    ball.wasShotAttempt = false;
     giveBallToPlayer(state, ball, rec, rng, false);
     return;
   }
 
   arrangeFreeThrowLineup(state, shooter, targetHoop);
+  ball.wasShotAttempt = false;
   giveBallToPlayer(state, ball, shooter, rng, false);
   shooter.aiAction = 'free_throw';
   shooter.aiThought = `Штрафной бросок (1/${totalShots})`;
@@ -1824,6 +1861,22 @@ export function adjudicatePersonalFoul(
 
   offender.fouls++;
   state.teamFouls[offender.team]++;
+
+  // По правилам FIBA/NBA промах при фоле на броске НЕ идёт в статистику промахов с игры (FGA/3PA) и не даёт ложный подбор
+  if ((foulKind === 'shooting_2' || foulKind === 'shooting_3') && victim) {
+    const activeShotBall = state.balls.find(
+      (b) => b.wasShotAttempt && b.lastShooterId === victim.id && !b.isGuaranteedSwish
+    );
+    if (activeShotBall) {
+      if (activeShotBall.targetHoop === getAttackingHoop(victim.team)) {
+        victim.fgAttempted = Math.max(0, victim.fgAttempted - 1);
+        if (foulKind === 'shooting_3') {
+          victim.threeAttempted = Math.max(0, victim.threeAttempted - 1);
+        }
+      }
+      activeShotBall.wasShotAttempt = false;
+    }
+  }
 
   // Неспортивный фол: скамейка штрафников на 8с (максимум 1 штрафник на команду)
   let sentToBench = false;
@@ -2575,48 +2628,413 @@ function stepFreeThrowSequence(
   }
 }
 
+let activeStepState: MatchState | null = null;
+let activeStepRng: () => number = Math.random;
+let activeStepIsIce = false;
+let activeFoulInterruptedStep = false;
+
+const sharedDecisionCallbacks: AIDecisionCallbacks = {
+  onShoot: (shooter, ball, targetHoop, isDunk, isPanic, shotStyle = 'standard') => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    if (isDunk) {
+      shooter.vz = Math.max(shooter.vz, 275);
+      launchBallShot(state, ball, shooter, targetHoop, 'dunk', rng, 'standard');
+    } else if (isPanic) {
+      launchBallShot(state, ball, shooter, targetHoop, 'panic', rng, 'standard');
+    } else {
+      shooter.aiAction =
+        shotStyle === 'floater'
+          ? 'floater'
+          : shotStyle === 'hook'
+          ? 'post_up'
+          : 'shoot_windup';
+      shooter.windupShotStyle = shotStyle;
+      shooter.windupTimer =
+        shotStyle === 'floater'
+          ? 0.12
+          : shooter.traitIds.includes('showboat')
+          ? 0.42
+          : 0.16;
+      shooter.windupTargetHoop = targetHoop;
+      shooter.windupBallId = ball.id;
+      if (shooter.z === 0) {
+        shooter.vz = shotStyle === 'floater' ? 135 : 155;
+      }
+    }
+  },
+  onPass: (passer, ball, receiver, isAlleyOop, isSafeHighLob) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    const wasInboundPass = state.inbound?.passerId === passer.id;
+    passer.aiAction = 'pass';
+    launchPass(state, ball, passer, receiver, Boolean(isAlleyOop), Boolean(isSafeHighLob));
+    if (wasInboundPass) {
+      state.inbound = null;
+    } else {
+      const atkHoop = getHoopPosition(getAttackingHoop(passer.team));
+      const dHoop = Math.hypot(passer.x - atkHoop.x, passer.y - atkHoop.y);
+      if (
+        dHoop > 170 &&
+        dHoop < 460 &&
+        passer.effectiveStats.iq >= 50 &&
+        passer.effectiveStats.teamwork >= 46 &&
+        !passer.traitIds.includes('parking_sniper') &&
+        !passer.traitIds.includes('sleepy_fly') &&
+        rng() < 0.58
+      ) {
+        passer.aiAction = 'give_and_go';
+        passer.cutTimer = 1.45;
+        passer.aiThought = 'Отдал и врывается под ответку (Дай и беги)!';
+      }
+    }
+  },
+  onPumpFake: (shooter, defender) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    shooter.pumpFakeCd = 5.2;
+    shooter.pumpFakeTimer = 0.22;
+    shooter.decisionTimer = 0.24;
+    if ((shooter.dribbleLiveTimer ?? 0) > 0.38) {
+      shooter.hasStoppedDribble = true;
+    }
+    shooter.aiAction = 'pump_fake';
+    shooter.aiThought = 'Ложный замах броска!';
+    spawnCallout(state, shooter.x, shooter.y - 20, 'ЛОЖНЫЙ ЗАМАХ!', '#fde047', 0.95);
+
+    const biteProb = Math.max(
+      0.1,
+      Math.min(
+        0.94,
+        0.66 -
+          (defender.effectiveStats.iq / 100) * 0.44 +
+          (shooter.effectiveStats.iq / 100) * 0.22 +
+          (defender.traitIds.includes('panicker') ? 0.18 : 0) +
+          (defender.aiAction === 'closeout' ? 0.16 : 0) +
+          (shooter.traitIds.includes('showboat') ? 0.12 : 0)
+      )
+    );
+    if (rng() < biteProb && defender.z === 0) {
+      defender.vz = computeJumpVelocity(defender, false) * 0.92;
+      defender.bittenByFakeTimer = 0.95;
+      const lungeAng =
+        Math.atan2(shooter.y - defender.y, shooter.x - defender.x) +
+        (defender.slotIndex % 2 === 0 ? 0.36 : -0.36);
+      defender.vx += Math.cos(lungeAng) * 145;
+      defender.vy += Math.sin(lungeAng) * 145;
+      defender.aiThought = 'Ай! Купился на ложный замах!';
+      spawnCallout(state, defender.x, defender.y - 18, 'КУПИЛСЯ НА ФЕЙК!', '#38bdf8', 0.95);
+      sound.playBounce(0.6);
+    } else {
+      defender.aiThought = 'Не купился на фейк — стоит на ногах!';
+    }
+  },
+  onGhostPumpFake: (shooter) => {
+    const state = activeStepState!;
+    shooter.pumpFakeCd = 5.5;
+    shooter.pumpFakeTimer = 0.28;
+    shooter.decisionTimer = 0.28;
+    shooter.aiAction = 'pump_fake';
+    shooter.aiThought = 'Качает воздух ложным замахом — вокруг ни души!';
+    spawnCallout(state, shooter.x, shooter.y - 20, 'КАЧАЕТ ВОЗДУХ!', '#fde047', 1.1);
+    pushEvent(
+      state,
+      `${shooter.name} грозно качнул воздух ложным замахом — хотя в трёх метрах вокруг никого не было!`,
+      shooter.team,
+      false
+    );
+  },
+  onHandoffMove: (giver, receiver, ball) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    giver.handoffCd = 5.0;
+    giver.handoffHoldTimer = 1.15;
+    giver.pickupLockout = 0.65;
+    giver.actionCooldown = 0.45;
+    giver.vx *= 0.2;
+    giver.vy *= 0.2;
+    giver.aiAction = 'screen_set';
+    giver.aiThought = `Отдал из рук в руки ${receiver.name.split(' ')[0]} и встал в заслон!`;
+
+    giveBallToPlayer(state, ball, receiver, rng, false);
+    ball.lastPasserId = giver.id;
+    receiver.actionCooldown = 0.12;
+    receiver.decisionTimer = 0.1;
+    receiver.aiAction = 'drive';
+    receiver.aiThought = 'Забрал мяч из рук в руки под заслон!';
+    spawnCallout(state, giver.x, giver.y - 20, 'ИЗ РУК В РУКИ!', '#38bdf8', 1.0);
+    sound.playBounce(0.6);
+  },
+  onIntentionalFoul: (defender, carrier) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    defender.aiAction = 'intentional_foul';
+    defender.aiThought = 'Умышленный тактический фол — останавливает время!';
+    spawnCallout(state, defender.x, defender.y - 22, 'ТАКТИЧЕСКИЙ ФОЛ!', '#f97316', 1.35);
+    pushEvent(
+      state,
+      `ТАКТИКА КОНЦОВКИ! ${defender.name} умышленно фолит на ${carrier.name}, чтобы остановить секундомер!`,
+      defender.team,
+      true
+    );
+    adjudicatePersonalFoul(state, defender, carrier, 'reach_in', rng);
+    activeFoulInterruptedStep = true;
+  },
+  onStepBackMove: (carrier, defender, ball, targetHoop) => {
+    const state = activeStepState!;
+    carrier.stepBackCd = 6.2;
+    carrier.aiAction = 'step_back';
+    const atkHoop = getHoopPosition(targetHoop);
+    const dxAway = carrier.x - atkHoop.x;
+    const dyAway = carrier.y - atkHoop.y;
+    const curDist = Math.max(1, Math.hypot(dxAway, dyAway));
+    const targetDist = Math.max(curDist + 42, THREE_PT_RADIUS + 20);
+    const ux = dxAway / curDist;
+    const uy = dyAway / curDist;
+    const side = getCommittedBypassSide(carrier);
+    let stepX = atkHoop.x + ux * targetDist - uy * side * 14;
+    let stepY = atkHoop.y + uy * targetDist + ux * side * 14;
+    stepX = Math.max(COURT_LEFT + 22, Math.min(COURT_RIGHT - 22, stepX));
+    if (state.frontcourtEstablished) {
+      stepX = carrier.team === 0 ? Math.max(MID_X + 24, stepX) : Math.min(MID_X - 24, stepX);
+    }
+    stepY = Math.max(COURT_TOP + 22, Math.min(COURT_BOTTOM - 22, stepY));
+
+    carrier.x = stepX;
+    carrier.y = stepY;
+    carrier.targetX = stepX;
+    carrier.targetY = stepY;
+    carrier.vx = ux * 95;
+    carrier.vy = uy * 95;
+    carrier.vz = Math.max(carrier.vz, 165);
+    carrier.windupTimer = 0.14;
+    carrier.windupTargetHoop = targetHoop;
+    carrier.windupBallId = ball.id;
+    carrier.hasStoppedDribble = true;
+    carrier.aiThought = 'Степ-бэк за дугу и трёхочковый!';
+    defender.stealCooldown = Math.max(defender.stealCooldown, 0.55);
+    spawnCallout(state, carrier.x, carrier.y - 20, 'СТЕП-БЭК!', '#fbbf24', 1.05);
+    sound.playBounce(0.7);
+  },
+  onEurostepMove: (carrier, defender, _ball, targetHoop) => {
+    const state = activeStepState!;
+    carrier.eurostepCd = 5.2;
+    carrier.aiAction = 'eurostep';
+    carrier.actionCooldown = 0.12;
+    const atkHoop = getHoopPosition(targetHoop);
+    const toHoopAng = Math.atan2(atkHoop.y - carrier.y, atkHoop.x - carrier.x);
+    const defRelAng = wrapAngle(
+      Math.atan2(defender.y - carrier.y, defender.x - carrier.x) - toHoopAng
+    );
+    const jukeSide =
+      Math.abs(defRelAng) > 0.08
+        ? defRelAng > 0
+          ? -1
+          : 1
+        : getCommittedBypassSide(carrier);
+    const slashAng = toHoopAng + jukeSide * 0.68;
+    const nextX = Math.max(
+      COURT_LEFT + 20,
+      Math.min(COURT_RIGHT - 20, carrier.x + Math.cos(slashAng) * 34)
+    );
+    const nextY = Math.max(
+      COURT_TOP + 20,
+      Math.min(COURT_BOTTOM - 20, carrier.y + Math.sin(slashAng) * 34)
+    );
+    carrier.x = nextX;
+    carrier.y = nextY;
+    carrier.vx = Math.cos(toHoopAng + jukeSide * 0.25) * 165;
+    carrier.vy = Math.sin(toHoopAng + jukeSide * 0.25) * 165;
+    carrier.targetX = atkHoop.x;
+    carrier.targetY = Math.max(
+      COURT_TOP + 28,
+      Math.min(COURT_BOTTOM - 28, atkHoop.y + jukeSide * 26)
+    );
+    carrier.decisionTimer = 0.08;
+    defender.stealCooldown = Math.max(defender.stealCooldown, 0.6);
+    carrier.aiThought = 'Обходит корпус защитника евростепом!';
+    spawnCallout(state, carrier.x, carrier.y - 20, 'ЕВРОСТЕП!', '#38bdf8', 0.95);
+    sound.playBounce(0.65);
+  },
+  onCrossoverMove: (carrier, defender, ball) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    const isIce = activeStepIsIce;
+    carrier.crossoverCd = 4.6;
+
+    if (
+      (carrier.effectiveStats.dribble <= 28 || carrier.traitIds.includes('butterfingers')) &&
+      carrier.effectiveStats.iq <= 40
+    ) {
+      carrier.pickupLockout = 0.75;
+      carrier.actionCooldown = 0.5;
+      ball.holderId = null;
+      ball.shotType = 'none';
+      ball.targetHoop = null;
+      ball.z = 14;
+      const bAng = carrier.heading + (rng() - 0.5) * 1.4;
+      ball.vx = Math.cos(bAng) * 145;
+      ball.vy = Math.sin(bAng) * 145;
+      ball.vz = 65;
+      carrier.aiThought = 'Ой! Стукнул мячом себе в кроссовок!';
+      spawnCallout(state, carrier.x, carrier.y - 20, 'В СВОЮ НОГУ!', '#fca5a5', 1.1);
+      pushEvent(
+        state,
+        `${carrier.name} попытался финтить, но стукнул мячом себе в кроссовок!`,
+        carrier.team,
+        false
+      );
+      return;
+    }
+
+    carrier.aiAction = 'ankle_breaker';
+    const side = getCommittedBypassSide(carrier);
+    const burstAng = carrier.heading + side * 0.72;
+    carrier.vx += Math.cos(burstAng) * 135;
+    carrier.vy += Math.sin(burstAng) * 135;
+
+    const ankleScore =
+      carrier.effectiveStats.dribble * 0.62 +
+      carrier.effectiveStats.speed * 0.28 -
+      defender.effectiveStats.iq * 0.42 -
+      defender.effectiveStats.steal * 0.25 +
+      (isIce ? 22 : 0) +
+      (carrier.traitIds.includes('showboat') ? 10 : 0);
+    const ankleProb = Math.max(0.06, Math.min(0.55, 0.14 + ankleScore / 140));
+
+    if (rng() < ankleProb) {
+      defender.trippedTimer = 0.85;
+      defender.vx -= Math.cos(burstAng) * 115;
+      defender.vy -= Math.sin(burstAng) * 115;
+      defender.aiAction = 'tripped_down';
+      defender.aiThought = 'Упал от кроссовера — лодыжки хрустнули!';
+      carrier.aiThought = 'Сломал лодыжки защитнику кроссовером!';
+      spawnCallout(state, carrier.x, carrier.y - 22, 'ЛОДЫЖКИ ХРУСТНУЛИ!', '#f97316', 1.25);
+      spawnParticles(state, defender.x, defender.y, 6, '#fbbf24', 12, 0.9, rng);
+      pushEvent(
+        state,
+        `${carrier.name} резким кроссовером уложил ${defender.name} на паркет без фола!`,
+        carrier.team,
+        true
+      );
+    } else {
+      carrier.aiThought = 'Резкий кроссовер на скорости!';
+      spawnCallout(state, carrier.x, carrier.y - 18, 'КРОССОВЕР!', '#fde047', 0.8);
+    }
+  },
+  onJump: (jumper, useSuperJump, reason) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    if (jumper.z > 0) return;
+    const actualSuper =
+      useSuperJump &&
+      jumper.traitIds.includes('grasshopper') &&
+      jumper.superJumpCd <= 0 &&
+      jumper.energy >= 15;
+    jumper.vz = computeJumpVelocity(jumper, actualSuper);
+    if (actualSuper) {
+      jumper.superJumpCd = 3.5;
+      jumper.energy = Math.max(0, jumper.energy - 16);
+      sound.playSpringJump();
+      spawnCallout(state, jumper.x, jumper.y - 18, 'КУЗНЕЧИК!', '#4ade80', 1.1);
+      spawnParticles(state, jumper.x, jumper.y, 2, '#4ade80', 10, 0.85, rng);
+    } else {
+      jumper.energy = Math.max(0, jumper.energy - 6);
+    }
+    jumper.aiThought = reason;
+  },
+  onAttemptSteal: (defender, carrier, ball) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    defender.stealCooldown = 1.05;
+    const stealScore =
+      defender.effectiveStats.steal * 0.58 - carrier.effectiveStats.dribble * 0.48;
+    let prob = Math.max(0.05, Math.min(0.48, 0.12 + stealScore / 160));
+    if (
+      isOnOwnHalf(carrier) &&
+      state.possessionTimer < 1.4 &&
+      !carrier.traitIds.includes('butterfingers')
+    ) {
+      prob *= 0.38;
+    }
+    if (rng() < prob) {
+      defender.steals++;
+      carrier.pickupLockout = 0.65;
+      giveBallToPlayer(state, ball, defender, rng, true);
+      spawnCallout(state, defender.x, defender.y - 18, 'ПЕРЕХВАТ!', '#38bdf8', 1.0);
+      pushEvent(state, `${defender.name} чисто выкрал мяч у ${carrier.name}!`, defender.team, false);
+    } else if (!state.inbound && state.balls.length === 1) {
+      const reachFoulProb =
+        0.07 +
+        (defender.effectiveStats.deviance / 100) * 0.11 -
+        (defender.effectiveStats.iq / 100) * 0.04;
+      if (
+        rng() < reachFoulProb &&
+        rng() < computeRefereeDetectionChance(state.referee, defender).chance
+      ) {
+        adjudicatePersonalFoul(state, defender, carrier, 'reach_in', rng);
+        activeFoulInterruptedStep = true;
+      }
+    }
+  },
+  onAttemptDirtyTrick: (offender, kind, victim, ball) => {
+    const state = activeStepState!;
+    const rng = activeStepRng;
+    handleDirtyTrick(state, offender, kind, rng, victim, ball);
+    if (state.freeThrow || state.inbound) {
+      activeFoulInterruptedStep = true;
+    }
+  },
+};
+
 export function stepMatch(
   state: MatchState,
   rawDt: number,
-  rng: () => number = Math.random
+  rng: () => number = Math.random,
+  customDriver?: PlayerDecisionDriver
 ): void {
   if (state.finished) return;
 
   const dt = Math.min(rawDt, 0.05);
+  const gravity = getEffectiveGravity(state.modifiers);
 
-  // Обновление визуальных затуханий (работают даже в hitstop)
-  state.cameraShake = Math.max(0, state.cameraShake - dt * 1.8);
-  state.netSwayLeft = Math.max(0, state.netSwayLeft - dt * 2.4);
-  state.netSwayRight = Math.max(0, state.netSwayRight - dt * 2.4);
   state.referee.whistleTimer = Math.max(0, state.referee.whistleTimer - dt);
 
-  for (const c of state.callouts) {
-    if (!c.active) continue;
-    c.age += dt;
-    if (c.age >= c.duration) c.active = false;
-  }
+  if (!state.headless) {
+    // Обновление визуальных затуханий (работают даже в hitstop)
+    state.cameraShake = Math.max(0, state.cameraShake - dt * 1.8);
+    state.netSwayLeft = Math.max(0, state.netSwayLeft - dt * 2.4);
+    state.netSwayRight = Math.max(0, state.netSwayRight - dt * 2.4);
 
-  const gravity = getEffectiveGravity(state.modifiers);
-  for (const p of state.particles) {
-    if (!p.active) continue;
-    p.age += dt;
-    if (p.age >= p.maxAge) {
-      p.active = false;
-      continue;
+    for (const c of state.callouts) {
+      if (!c.active) continue;
+      c.age += dt;
+      if (c.age >= c.duration) c.active = false;
     }
-    p.vz -= gravity * 0.65 * dt;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.z = Math.max(0, p.z + p.vz * dt);
-  }
 
-  if (state.hitstopTimer > 0) {
-    state.hitstopTimer = Math.max(0, state.hitstopTimer - dt);
-    return;
+    for (const p of state.particles) {
+      if (!p.active) continue;
+      p.age += dt;
+      if (p.age >= p.maxAge) {
+        p.active = false;
+        continue;
+      }
+      p.vz -= gravity * 0.65 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z = Math.max(0, p.z + p.vz * dt);
+    }
+
+    if (state.hitstopTimer > 0) {
+      state.hitstopTimer = Math.max(0, state.hitstopTimer - dt);
+      return;
+    }
+  } else if (state.hitstopTimer > 0) {
+    state.hitstopTimer = 0;
   }
 
   if (state.quarterBreakTimer > 0) {
-    state.quarterBreakTimer = Math.max(0, state.quarterBreakTimer - dt);
+    state.quarterBreakTimer = state.headless ? 0 : Math.max(0, state.quarterBreakTimer - dt);
     if (state.quarterBreakTimer <= 0) {
       startNextPeriod(state, rng);
     }
@@ -2624,7 +3042,7 @@ export function stepMatch(
   }
 
   if (state.celebrationTimer > 0) {
-    state.celebrationTimer = Math.max(0, state.celebrationTimer - dt);
+    state.celebrationTimer = state.headless ? 0 : Math.max(0, state.celebrationTimer - dt);
     if (state.celebrationTimer <= 0) {
       state.lastBannerText = null;
     }
@@ -3048,346 +3466,50 @@ export function stepMatch(
       }
     }
 
-    let foulInterruptedStep = false;
+    activeStepState = state;
+    activeStepRng = rng;
+    activeStepIsIce = isIce;
+    activeFoulInterruptedStep = false;
 
-    // Шаг принятия решений ИИ
-    stepPlayerAI(state, p, dt, rng, {
-      onShoot: (shooter, ball, targetHoop, isDunk, isPanic, shotStyle = 'standard') => {
-        if (isDunk) {
-          shooter.vz = Math.max(shooter.vz, 275);
-          launchBallShot(state, ball, shooter, targetHoop, 'dunk', rng, 'standard');
-        } else if (isPanic) {
-          launchBallShot(state, ball, shooter, targetHoop, 'panic', rng, 'standard');
-        } else {
-          shooter.aiAction =
-            shotStyle === 'floater'
-              ? 'floater'
-              : shotStyle === 'hook'
-              ? 'post_up'
-              : 'shoot_windup';
-          shooter.windupShotStyle = shotStyle;
-          shooter.windupTimer =
-            shotStyle === 'floater'
-              ? 0.12
-              : shooter.traitIds.includes('showboat')
-              ? 0.42
-              : 0.16;
-          shooter.windupTargetHoop = targetHoop;
-          shooter.windupBallId = ball.id;
-          if (shooter.z === 0) {
-            shooter.vz = shotStyle === 'floater' ? 135 : 155;
-          }
-        }
-      },
-      onPass: (passer, ball, receiver, isAlleyOop, isSafeHighLob) => {
-        const wasInboundPass = state.inbound?.passerId === passer.id;
-        passer.aiAction = 'pass';
-        launchPass(state, ball, passer, receiver, Boolean(isAlleyOop), Boolean(isSafeHighLob));
-        if (wasInboundPass) {
-          state.inbound = null;
-        } else {
-          // Умная связка «Дай и беги» (Give-and-Go): отдав пас на периметре, командный игрок тут же врывается под кольцо за ответкой!
-          const atkHoop = getHoopPosition(getAttackingHoop(passer.team));
-          const dHoop = Math.hypot(passer.x - atkHoop.x, passer.y - atkHoop.y);
-          if (
-            dHoop > 170 &&
-            dHoop < 460 &&
-            passer.effectiveStats.iq >= 50 &&
-            passer.effectiveStats.teamwork >= 46 &&
-            !passer.traitIds.includes('parking_sniper') &&
-            !passer.traitIds.includes('sleepy_fly') &&
-            rng() < 0.58
-          ) {
-            passer.aiAction = 'give_and_go';
-            passer.cutTimer = 1.45;
-            passer.aiThought = 'Отдал и врывается под ответку (Дай и беги)!';
-          }
-        }
-      },
-      onPumpFake: (shooter, defender) => {
-        shooter.pumpFakeCd = 5.2;
-        shooter.pumpFakeTimer = 0.22;
-        shooter.decisionTimer = 0.24;
-        if ((shooter.dribbleLiveTimer ?? 0) > 0.38) {
-          shooter.hasStoppedDribble = true;
-        }
-        shooter.aiAction = 'pump_fake';
-        shooter.aiThought = 'Ложный замах броска!';
-        spawnCallout(state, shooter.x, shooter.y - 20, 'ЛОЖНЫЙ ЗАМАХ!', '#fde047', 0.95);
-
-        const biteProb = Math.max(
-          0.1,
-          Math.min(
-            0.94,
-            0.66 -
-              (defender.effectiveStats.iq / 100) * 0.44 +
-              (shooter.effectiveStats.iq / 100) * 0.22 +
-              (defender.traitIds.includes('panicker') ? 0.18 : 0) +
-              (defender.aiAction === 'closeout' ? 0.16 : 0) +
-              (shooter.traitIds.includes('showboat') ? 0.12 : 0)
-          )
+    // Шаг принятия решений ИИ: внешний RL-драйвер, встроенный Нейро-ИИ (15 Гц) или эвристика
+    const teamCtrl = state.teamControllers?.[p.team] ?? 'heuristic';
+    if (customDriver) {
+      customDriver(state, p, dt, rng, sharedDecisionCallbacks);
+    } else if (teamCtrl === 'neural') {
+      if (p.decisionTimer > 1 / 15) {
+        p.decisionTimer = 1 / 15;
+      }
+      p.decisionTimer -= dt;
+      if (p.decisionTimer <= 0) {
+        p.decisionTimer = 1 / 15;
+        encodeObservation(state, p, scratchNeuralObs, 0);
+        applyInertialIqPerceptionNoise(scratchNeuralObs, p, state, rng, 0);
+        computeActionMask(state, p, scratchNeuralMask, 0);
+        const iqTemp = computeIqTemperature(p.effectiveStats.iq);
+        getActiveNeuralPolicy().act(
+          scratchNeuralObs,
+          scratchNeuralMask,
+          false,
+          rng,
+          scratchNeuralAction,
+          iqTemp
         );
-        if (rng() < biteProb && defender.z === 0) {
-          defender.vz = computeJumpVelocity(defender, false) * 0.92;
-          defender.bittenByFakeTimer = 0.95;
-          const lungeAng =
-            Math.atan2(shooter.y - defender.y, shooter.x - defender.x) +
-            (defender.slotIndex % 2 === 0 ? 0.36 : -0.36);
-          defender.vx += Math.cos(lungeAng) * 145;
-          defender.vy += Math.sin(lungeAng) * 145;
-          defender.aiThought = 'Ай! Купился на ложный замах!';
-          spawnCallout(state, defender.x, defender.y - 18, 'КУПИЛСЯ НА ФЕЙК!', '#38bdf8', 0.95);
-          sound.playBounce(0.6);
-        } else {
-          defender.aiThought = 'Не купился на фейк — стоит на ногах!';
-        }
-      },
-      onGhostPumpFake: (shooter) => {
-        shooter.pumpFakeCd = 5.5;
-        shooter.pumpFakeTimer = 0.28;
-        shooter.decisionTimer = 0.28;
-        shooter.aiAction = 'pump_fake';
-        shooter.aiThought = 'Качает воздух ложным замахом — вокруг ни души!';
-        spawnCallout(state, shooter.x, shooter.y - 20, 'КАЧАЕТ ВОЗДУХ!', '#fde047', 1.1);
-        pushEvent(
+        applyAgentAction(
           state,
-          `${shooter.name} грозно качнул воздух ложным замахом — хотя в трёх метрах вокруг никого не было!`,
-          shooter.team,
-          false
+          p,
+          scratchNeuralAction,
+          scratchNeuralMask,
+          sharedDecisionCallbacks,
+          0,
+          1 / 15,
+          rng
         );
-      },
-      onHandoffMove: (giver, receiver, ball) => {
-        giver.handoffCd = 5.0;
-        giver.handoffHoldTimer = 1.15;
-        giver.pickupLockout = 0.65;
-        giver.actionCooldown = 0.45;
-        giver.vx *= 0.2;
-        giver.vy *= 0.2;
-        giver.aiAction = 'screen_set';
-        giver.aiThought = `Отдал из рук в руки ${receiver.name.split(' ')[0]} и встал в заслон!`;
+      }
+    } else if (teamCtrl === 'heuristic') {
+      stepPlayerAI(state, p, dt, rng, sharedDecisionCallbacks);
+    }
 
-        giveBallToPlayer(state, ball, receiver, rng, false);
-        ball.lastPasserId = giver.id;
-        receiver.actionCooldown = 0.12;
-        receiver.decisionTimer = 0.1;
-        receiver.aiAction = 'drive';
-        receiver.aiThought = 'Забрал мяч из рук в руки под заслон!';
-        spawnCallout(state, giver.x, giver.y - 20, 'ИЗ РУК В РУКИ!', '#38bdf8', 1.0);
-        sound.playBounce(0.6);
-      },
-      onIntentionalFoul: (defender, carrier) => {
-        defender.aiAction = 'intentional_foul';
-        defender.aiThought = 'Умышленный тактический фол — останавливает время!';
-        spawnCallout(state, defender.x, defender.y - 22, 'ТАКТИЧЕСКИЙ ФОЛ!', '#f97316', 1.35);
-        pushEvent(
-          state,
-          `ТАКТИКА КОНЦОВКИ! ${defender.name} умышленно фолит на ${carrier.name}, чтобы остановить секундомер!`,
-          defender.team,
-          true
-        );
-        adjudicatePersonalFoul(state, defender, carrier, 'reach_in', rng);
-        foulInterruptedStep = true;
-      },
-      onStepBackMove: (carrier, defender, ball, targetHoop) => {
-        carrier.stepBackCd = 6.2;
-        carrier.aiAction = 'step_back';
-        const atkHoop = getHoopPosition(targetHoop);
-        const dxAway = carrier.x - atkHoop.x;
-        const dyAway = carrier.y - atkHoop.y;
-        const curDist = Math.max(1, Math.hypot(dxAway, dyAway));
-        const targetDist = Math.max(curDist + 42, THREE_PT_RADIUS + 20);
-        const ux = dxAway / curDist;
-        const uy = dyAway / curDist;
-        const side = getCommittedBypassSide(carrier);
-        let stepX = atkHoop.x + ux * targetDist - uy * side * 14;
-        let stepY = atkHoop.y + uy * targetDist + ux * side * 14;
-        stepX = Math.max(COURT_LEFT + 22, Math.min(COURT_RIGHT - 22, stepX));
-        if (state.frontcourtEstablished) {
-          stepX = carrier.team === 0 ? Math.max(MID_X + 24, stepX) : Math.min(MID_X - 24, stepX);
-        }
-        stepY = Math.max(COURT_TOP + 22, Math.min(COURT_BOTTOM - 22, stepY));
-
-        carrier.x = stepX;
-        carrier.y = stepY;
-        carrier.targetX = stepX;
-        carrier.targetY = stepY;
-        carrier.vx = ux * 95;
-        carrier.vy = uy * 95;
-        carrier.vz = Math.max(carrier.vz, 165);
-        carrier.windupTimer = 0.14;
-        carrier.windupTargetHoop = targetHoop;
-        carrier.windupBallId = ball.id;
-        carrier.hasStoppedDribble = true;
-        carrier.aiThought = 'Степ-бэк за дугу и трёхочковый!';
-        defender.stealCooldown = Math.max(defender.stealCooldown, 0.55);
-        spawnCallout(state, carrier.x, carrier.y - 20, 'СТЕП-БЭК!', '#fbbf24', 1.05);
-        sound.playBounce(0.7);
-      },
-      onEurostepMove: (carrier, defender, _ball, targetHoop) => {
-        carrier.eurostepCd = 5.2;
-        carrier.aiAction = 'eurostep';
-        carrier.actionCooldown = 0.12;
-        const atkHoop = getHoopPosition(targetHoop);
-        const toHoopAng = Math.atan2(atkHoop.y - carrier.y, atkHoop.x - carrier.x);
-        const defRelAng = wrapAngle(
-          Math.atan2(defender.y - carrier.y, defender.x - carrier.x) - toHoopAng
-        );
-        const jukeSide =
-          Math.abs(defRelAng) > 0.08
-            ? defRelAng > 0
-              ? -1
-              : 1
-            : getCommittedBypassSide(carrier);
-        const slashAng = toHoopAng + jukeSide * 0.68;
-        const nextX = Math.max(
-          COURT_LEFT + 20,
-          Math.min(COURT_RIGHT - 20, carrier.x + Math.cos(slashAng) * 34)
-        );
-        const nextY = Math.max(
-          COURT_TOP + 20,
-          Math.min(COURT_BOTTOM - 20, carrier.y + Math.sin(slashAng) * 34)
-        );
-        carrier.x = nextX;
-        carrier.y = nextY;
-        carrier.vx = Math.cos(toHoopAng + jukeSide * 0.25) * 165;
-        carrier.vy = Math.sin(toHoopAng + jukeSide * 0.25) * 165;
-        carrier.targetX = atkHoop.x;
-        carrier.targetY = Math.max(
-          COURT_TOP + 28,
-          Math.min(COURT_BOTTOM - 28, atkHoop.y + jukeSide * 26)
-        );
-        carrier.decisionTimer = 0.08;
-        defender.stealCooldown = Math.max(defender.stealCooldown, 0.6);
-        carrier.aiThought = 'Обходит корпус защитника евростепом!';
-        spawnCallout(state, carrier.x, carrier.y - 20, 'ЕВРОСТЕП!', '#38bdf8', 0.95);
-        sound.playBounce(0.65);
-      },
-      onCrossoverMove: (carrier, defender, ball) => {
-        carrier.crossoverCd = 4.6;
-
-        // Комедия низкого дриблинга: неуклюжий балбес пытается выдать финт и стукает мячом себе в кроссовок!
-        if (
-          (carrier.effectiveStats.dribble <= 28 || carrier.traitIds.includes('butterfingers')) &&
-          carrier.effectiveStats.iq <= 40
-        ) {
-          carrier.pickupLockout = 0.75;
-          carrier.actionCooldown = 0.5;
-          ball.holderId = null;
-          ball.shotType = 'none';
-          ball.targetHoop = null;
-          ball.z = 14;
-          const bAng = carrier.heading + (rng() - 0.5) * 1.4;
-          ball.vx = Math.cos(bAng) * 145;
-          ball.vy = Math.sin(bAng) * 145;
-          ball.vz = 65;
-          carrier.aiThought = 'Ой! Стукнул мячом себе в кроссовок!';
-          spawnCallout(state, carrier.x, carrier.y - 20, 'В СВОЮ НОГУ!', '#fca5a5', 1.1);
-          pushEvent(
-            state,
-            `${carrier.name} попытался финтить, но стукнул мячом себе в кроссовок!`,
-            carrier.team,
-            false
-          );
-          return;
-        }
-
-        carrier.aiAction = 'ankle_breaker';
-        const side = getCommittedBypassSide(carrier);
-        const burstAng = carrier.heading + side * 0.72;
-        carrier.vx += Math.cos(burstAng) * 135;
-        carrier.vy += Math.sin(burstAng) * 135;
-
-        const ankleScore =
-          carrier.effectiveStats.dribble * 0.62 +
-          carrier.effectiveStats.speed * 0.28 -
-          defender.effectiveStats.iq * 0.42 -
-          defender.effectiveStats.steal * 0.25 +
-          (isIce ? 22 : 0) +
-          (carrier.traitIds.includes('showboat') ? 10 : 0);
-        const ankleProb = Math.max(0.06, Math.min(0.55, 0.14 + ankleScore / 140));
-
-        if (rng() < ankleProb) {
-          defender.trippedTimer = 0.85;
-          defender.vx -= Math.cos(burstAng) * 115;
-          defender.vy -= Math.sin(burstAng) * 115;
-          defender.aiAction = 'tripped_down';
-          defender.aiThought = 'Упал от кроссовера — лодыжки хрустнули!';
-          carrier.aiThought = 'Сломал лодыжки защитнику кроссовером!';
-          spawnCallout(state, carrier.x, carrier.y - 22, 'ЛОДЫЖКИ ХРУСТНУЛИ!', '#f97316', 1.25);
-          spawnParticles(state, defender.x, defender.y, 6, '#fbbf24', 12, 0.9, rng);
-          pushEvent(
-            state,
-            `${carrier.name} резким кроссовером уложил ${defender.name} на паркет без фола!`,
-            carrier.team,
-            true
-          );
-        } else {
-          carrier.aiThought = 'Резкий кроссовер на скорости!';
-          spawnCallout(state, carrier.x, carrier.y - 18, 'КРОССОВЕР!', '#fde047', 0.8);
-        }
-      },
-      onJump: (jumper, useSuperJump, reason) => {
-        if (jumper.z > 0) return;
-        const actualSuper =
-          useSuperJump &&
-          jumper.traitIds.includes('grasshopper') &&
-          jumper.superJumpCd <= 0 &&
-          jumper.energy >= 15;
-        jumper.vz = computeJumpVelocity(jumper, actualSuper);
-        if (actualSuper) {
-          jumper.superJumpCd = 3.5;
-          jumper.energy = Math.max(0, jumper.energy - 16);
-          sound.playSpringJump();
-          spawnCallout(state, jumper.x, jumper.y - 18, 'КУЗНЕЧИК!', '#4ade80', 1.1);
-          spawnParticles(state, jumper.x, jumper.y, 2, '#4ade80', 10, 0.85, rng);
-        } else {
-          jumper.energy = Math.max(0, jumper.energy - 6);
-        }
-        jumper.aiThought = reason;
-      },
-      onAttemptSteal: (defender, carrier, ball) => {
-        defender.stealCooldown = 1.05;
-        const stealScore =
-          defender.effectiveStats.steal * 0.58 - carrier.effectiveStats.dribble * 0.48;
-        let prob = Math.max(0.05, Math.min(0.48, 0.12 + stealScore / 160));
-        // После подбора в защите или приёма ввода на своей половине игрок укрывает мяч корпусом и локтями!
-        if (
-          isOnOwnHalf(carrier) &&
-          state.possessionTimer < 1.4 &&
-          !carrier.traitIds.includes('butterfingers')
-        ) {
-          prob *= 0.38;
-        }
-        if (rng() < prob) {
-          defender.steals++;
-          carrier.pickupLockout = 0.65;
-          giveBallToPlayer(state, ball, defender, rng, true);
-          spawnCallout(state, defender.x, defender.y - 18, 'ПЕРЕХВАТ!', '#38bdf8', 1.0);
-          pushEvent(state, `${defender.name} чисто выкрал мяч у ${carrier.name}!`, defender.team, false);
-        } else if (!state.inbound && state.balls.length === 1) {
-          // Фол при неудачной попытке выбить мяч по рукам (Reach-in Foul)!
-          const reachFoulProb =
-            0.07 +
-            (defender.effectiveStats.deviance / 100) * 0.11 -
-            (defender.effectiveStats.iq / 100) * 0.04;
-          if (
-            rng() < reachFoulProb &&
-            rng() < computeRefereeDetectionChance(state.referee, defender).chance
-          ) {
-            adjudicatePersonalFoul(state, defender, carrier, 'reach_in', rng);
-            foulInterruptedStep = true;
-          }
-        }
-      },
-      onAttemptDirtyTrick: (offender, kind, victim, ball) => {
-        handleDirtyTrick(state, offender, kind, rng, victim, ball);
-        if (state.freeThrow || state.inbound) {
-          foulInterruptedStep = true;
-        }
-      },
-    });
-
-    if (foulInterruptedStep) {
+    if (activeFoulInterruptedStep) {
       return;
     }
 
@@ -3984,8 +4106,8 @@ export function stepMatch(
       }
     }
 
-    // Черта «Магнит в шортах»: притягивает свободные мячи (кроме высоких навесов Месси)
-    if (ball.shotType !== 'messi' && ball.z < 95) {
+    // Черта «Магнит в шортах»: притягивает только свободные мячи (не броски и не передачи в полёте!)
+    if (ball.shotType === 'none' && ball.holderId === null && ball.z < 95) {
       for (const p of state.players) {
         if (p.penaltyTimer > 0 || p.trippedTimer > 0 || !p.traitIds.includes('magnet')) continue;
         const dx = p.x - ball.x;

@@ -1812,12 +1812,21 @@ export function stepPlayerAI(
       return;
     }
 
-    // Умный дриблинг по свободному коридору или под заслон
-    player.aiAction = 'drive';
+    // Сохраняем активный манёвр евростепа до завершения фазы шага (для иммунитета к фолу в атаке)
+    if (player.actionCooldown > 0 && player.aiAction === 'eurostep') {
+      return;
+    }
+
+    // Умный дриблинг по свободному коридору или под заслон (с сохранением метки кроссовера на время рывка)
+    if (player.aiAction !== 'ankle_breaker' || (player.crossoverCd ?? 0) <= 4.45) {
+      player.aiAction = 'drive';
+    }
     const driveChoice = chooseSmartDriveTarget(state, player, teammates, opponents);
     player.targetX = driveChoice.x;
     player.targetY = driveChoice.y;
-    player.aiThought = driveChoice.thought;
+    if (player.aiAction === 'drive') {
+      player.aiThought = driveChoice.thought;
+    }
     return;
   }
 
@@ -1946,12 +1955,12 @@ export function stepPlayerAI(
     }
   }
 
-  // 5б) Ничейные мячи на полу / вбрасывании (не перебиваем чужой точный пас!)
+  // 5б) Ничейные мячи на полу / вбрасывании (передачи в воздухе обрабатываются в блоках 1б и 2!)
   const looseBalls = state.balls.filter(
     (b) =>
       b.holderId === null &&
       b.targetHoop === null &&
-      !(b.shotType === 'pass' && b.lastTouchTeam === player.team && b.passReceiverId !== player.id)
+      b.shotType !== 'pass'
   );
   if (looseBalls.length > 0) {
     let closestLoose = looseBalls[0];
@@ -2010,16 +2019,26 @@ export function stepPlayerAI(
     const holder = activePlayers.find((p) => p.id === b.holderId);
     return holder && holder.team !== player.team;
   });
+  const enemyPassBall = state.balls.find(
+    (b) => b.holderId === null && b.shotType === 'pass' && b.lastTouchTeam !== null && b.lastTouchTeam !== player.team
+  );
+  const isEnemyTeamPossession =
+    Boolean(enemyCarrierBall) ||
+    Boolean(enemyPassBall) ||
+    (state.possessionTeam !== null && state.possessionTeam !== player.team && !alliedCarrierBall);
 
   // ==================== 6. КОМАНДНАЯ ЗАЩИТА (СМЕНА, ПОДСТРАХОВКА, ПЕРЕКРЫТИЕ ПАСА) ====================
-  if (enemyCarrierBall) {
+  if (isEnemyTeamPossession) {
     player.screenTargetId = null;
-    const carrier = opponents.find((o) => o.id === enemyCarrierBall.holderId);
+    const carrier = enemyCarrierBall
+      ? opponents.find((o) => o.id === enemyCarrierBall.holderId)
+      : undefined;
     const defHoop = getHoopPosition(getDefendingHoop(player.team));
     const oppTeamForDef: 0 | 1 = player.team === 0 ? 1 : 0;
     const defScoreDiff = state.score[player.team] - state.score[oppTeamForDef];
     const shouldIntentionalFoul =
       Boolean(callbacks.onIntentionalFoul) &&
+      Boolean(enemyCarrierBall) &&
       Boolean(carrier) &&
       state.quarter >= 4 &&
       state.quarterTimeRemaining <= 16 &&
@@ -2253,7 +2272,12 @@ export function stepPlayerAI(
         player.targetX = clampCourtX(leadCarrierX + (dxHoop / dHoop) * stanceDist);
         player.targetY = clampCourtY(leadCarrierY + (dyHoop / dHoop) * stanceDist + lateralShade);
 
-        if (distToCarrier < 40 && player.stealCooldown <= 0 && !disciplinedNoFoulLead) {
+        if (
+          enemyCarrierBall &&
+          distToCarrier < 40 &&
+          player.stealCooldown <= 0 &&
+          !disciplinedNoFoulLead
+        ) {
           callbacks.onAttemptSteal(player, carrier, enemyCarrierBall);
         }
         if (carrier.windupTimer > 0 && distToCarrier < 70 && player.z === 0) {
@@ -2273,7 +2297,7 @@ export function stepPlayerAI(
         player.aiThought = 'Смещается на подстраховку в краску!';
         player.targetX = clampCourtX(carrier.x + (defHoop.x - carrier.x) * 0.35);
         player.targetY = clampCourtY(carrier.y + (defHoop.y - carrier.y) * 0.35);
-        if (distToCarrier < 38 && player.stealCooldown <= 0) {
+        if (enemyCarrierBall && distToCarrier < 38 && player.stealCooldown <= 0) {
           callbacks.onAttemptSteal(player, carrier, enemyCarrierBall);
         }
         return;
@@ -2293,7 +2317,7 @@ export function stepPlayerAI(
         player.aiThought = 'Смена на заслоне — выходит на мяч!';
         player.targetX = clampCourtX(carrier.x + (defHoop.x - carrier.x) * 0.24);
         player.targetY = clampCourtY(carrier.y + (defHoop.y - carrier.y) * 0.24);
-        if (distToCarrier < 38 && player.stealCooldown <= 0) {
+        if (enemyCarrierBall && distToCarrier < 38 && player.stealCooldown <= 0) {
           callbacks.onAttemptSteal(player, carrier, enemyCarrierBall);
         }
         return;
@@ -2391,8 +2415,13 @@ export function stepPlayerAI(
           ? `Страхует краску и держит ${firstName}`
           : `Держит ${firstName} и кроет пас`;
       } else {
-        player.targetX = clampCourtX(assignedOpp.x + (defHoop.x - assignedOpp.x) * 0.25);
-        player.targetY = clampCourtY(assignedOpp.y + (defHoop.y - assignedOpp.y) * 0.25);
+        let tx = assignedOpp.x + (defHoop.x - assignedOpp.x) * 0.25;
+        const ty = assignedOpp.y + (defHoop.y - assignedOpp.y) * 0.25;
+        if (!state.frontcourtEstablished && teamTactic !== 'blitz') {
+          tx = player.team === 0 ? Math.min(tx, MID_X - 65) : Math.max(tx, MID_X + 65);
+        }
+        player.targetX = clampCourtX(tx);
+        player.targetY = clampCourtY(ty);
         player.aiThought = `Держит ${firstName}`;
       }
       return;

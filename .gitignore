@@ -6,3 +6,15 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# RL / PyTorch (RTX 5060) training artifacts
+__pycache__/
+*.py[cod]
+training/.venv/
+training/data/
+training/checkpoints/
+training/runs/
+*.pt
+*.pth
+*.f32
+*.u8
